@@ -18,23 +18,24 @@ import (
 	"fmt"
 
 	"github.com/coreos/flannel/backend"
+	"github.com/coreos/flannel/backend/l3backend"
 	"github.com/coreos/flannel/pkg/ip"
 	"github.com/coreos/flannel/subnet"
 	"golang.org/x/net/context"
 )
 
 func init() {
-	backend.Register("host-gw", New)
+	backend.Register(backendType, New)
 }
 
 const (
-	routeCheckRetries = 10
+	backendType = "host-gw"
 )
 
 type HostgwBackend struct {
 	sm       subnet.Manager
 	extIface *backend.ExternalInterface
-	networks map[string]*network
+	networks map[string]*l3backend.L3Network
 }
 
 func New(sm subnet.Manager, extIface *backend.ExternalInterface) (backend.Backend, error) {
@@ -45,27 +46,27 @@ func New(sm subnet.Manager, extIface *backend.ExternalInterface) (backend.Backen
 	be := &HostgwBackend{
 		sm:       sm,
 		extIface: extIface,
-		networks: make(map[string]*network),
+		networks: make(map[string]*l3backend.L3Network),
 	}
 
 	return be, nil
 }
 
 func (be *HostgwBackend) RegisterNetwork(ctx context.Context, config *subnet.Config) (backend.Network, error) {
-	n := &network{
-		extIface: be.extIface,
-		sm:       be.sm,
+	n := &l3backend.L3Network{
+		Sm:          be.sm,
+		BackendType: backendType,
 	}
 
 	attrs := subnet.LeaseAttrs{
 		PublicIP:    ip.FromIP(be.extIface.ExtAddr),
-		BackendType: "host-gw",
+		BackendType: backendType,
 	}
 
 	l, err := be.sm.AcquireLease(ctx, &attrs)
 	switch err {
 	case nil:
-		n.lease = l
+		n.OwnerLease = l
 
 	case context.Canceled, context.DeadlineExceeded:
 		return nil, err
@@ -74,7 +75,30 @@ func (be *HostgwBackend) RegisterNetwork(ctx context.Context, config *subnet.Con
 		return nil, fmt.Errorf("failed to acquire lease: %v", err)
 	}
 
+	n.RouteInfo = routeInfo{}
+	n.DevInfo = devInfo{mtu: be.extIface.Iface.MTU}
+
 	/* NB: docker will create the local route to `sn` */
 
 	return n, nil
+}
+
+type routeInfo struct {
+	linkIndex int
+}
+
+func (r routeInfo) LinkIndex() int {
+	return r.linkIndex
+}
+
+func (r routeInfo) Flags() int {
+	return 0
+}
+
+type devInfo struct {
+	mtu int
+}
+
+func (di devInfo) MTU() int {
+	return di.mtu
 }
