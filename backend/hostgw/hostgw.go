@@ -21,6 +21,7 @@ import (
 	"github.com/coreos/flannel/backend/l3backend"
 	"github.com/coreos/flannel/pkg/ip"
 	"github.com/coreos/flannel/subnet"
+	"github.com/vishvananda/netlink"
 	"golang.org/x/net/context"
 )
 
@@ -75,24 +76,19 @@ func (be *HostgwBackend) RegisterNetwork(ctx context.Context, config *subnet.Con
 		return nil, fmt.Errorf("failed to acquire lease: %v", err)
 	}
 
-	n.RouteInfo = routeInfo{}
+	n.GetRoute = func(lease *subnet.Lease) *netlink.Route {
+		route := netlink.Route{
+			Dst:       lease.Subnet.ToIPNet(),
+			Gw:        lease.Attrs.PublicIP.ToIP(),
+			LinkIndex: be.extIface.Iface.Index,
+		}
+		return &route
+	}
 	n.DevInfo = devInfo{mtu: be.extIface.Iface.MTU}
 
 	/* NB: docker will create the local route to `sn` */
 
 	return n, nil
-}
-
-type routeInfo struct {
-	linkIndex int
-}
-
-func (r routeInfo) LinkIndex() int {
-	return r.linkIndex
-}
-
-func (r routeInfo) Flags() int {
-	return 0
 }
 
 type devInfo struct {

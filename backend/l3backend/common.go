@@ -31,10 +31,7 @@ const (
 	routeCheckRetries = 10
 )
 
-type RouteInfo interface {
-	LinkIndex() int
-	Flags() int
-}
+type GetRoute func(*subnet.Lease) *netlink.Route
 
 type DevInfo interface {
 	MTU() int
@@ -47,7 +44,7 @@ type L3Network struct {
 	OwnerLease  *subnet.Lease
 	Sm          subnet.Manager
 
-	RouteInfo
+	GetRoute
 	DevInfo
 }
 
@@ -100,13 +97,7 @@ func (n *L3Network) handleSubnetEvents(batch []subnet.Event) {
 				log.Warningf("Ignoring non-%v subnet: type=%v", n.BackendType, evt.Lease.Attrs.BackendType)
 				continue
 			}
-
-			route := netlink.Route{
-				Dst:       evt.Lease.Subnet.ToIPNet(),
-				Gw:        evt.Lease.Attrs.PublicIP.ToIP(),
-				LinkIndex: n.RouteInfo.LinkIndex(),
-				Flags:     n.RouteInfo.Flags(),
-			}
+			route := n.GetRoute(&evt.Lease)
 
 			// Check if route exists before attempting to add it
 			routeList, err := netlink.RouteListFiltered(netlink.FAMILY_V4, &netlink.Route{
@@ -119,7 +110,7 @@ func (n *L3Network) handleSubnetEvents(batch []subnet.Event) {
 			if len(routeList) > 0 && !routeList[0].Gw.Equal(route.Gw) {
 				// Same Dst different Gw. Remove it, correct route will be added below.
 				log.Warningf("Replacing existing route to %v via %v with %v via %v.", evt.Lease.Subnet, routeList[0].Gw, evt.Lease.Subnet, evt.Lease.Attrs.PublicIP)
-				if err := netlink.RouteDel(&route); err != nil {
+				if err := netlink.RouteDel(route); err != nil {
 					log.Errorf("Error deleting route to %v: %v", evt.Lease.Subnet, err)
 					continue
 				}
@@ -127,11 +118,11 @@ func (n *L3Network) handleSubnetEvents(batch []subnet.Event) {
 			if len(routeList) > 0 && routeList[0].Gw.Equal(route.Gw) {
 				// Same Dst and same Gw, keep it and do not attempt to add it.
 				log.Infof("Route to %v via %v already exists, skipping.", evt.Lease.Subnet, evt.Lease.Attrs.PublicIP)
-			} else if err := netlink.RouteAdd(&route); err != nil {
+			} else if err := netlink.RouteAdd(route); err != nil {
 				log.Errorf("Error adding route to %v via %v: %v", evt.Lease.Subnet, evt.Lease.Attrs.PublicIP, err)
 				continue
 			}
-			n.addToRouteList(route)
+			n.addToRouteList(*route)
 
 		case subnet.EventRemoved:
 			log.Info("Subnet removed: ", evt.Lease.Subnet)
@@ -141,17 +132,12 @@ func (n *L3Network) handleSubnetEvents(batch []subnet.Event) {
 				continue
 			}
 
-			route := netlink.Route{
-				Dst:       evt.Lease.Subnet.ToIPNet(),
-				Gw:        evt.Lease.Attrs.PublicIP.ToIP(),
-				LinkIndex: n.RouteInfo.LinkIndex(),
-				Flags:     n.RouteInfo.Flags(),
-			}
-			if err := netlink.RouteDel(&route); err != nil {
+			route := n.GetRoute(&evt.Lease)
+			if err := netlink.RouteDel(route); err != nil {
 				log.Errorf("Error deleting route to %v: %v", evt.Lease.Subnet, err)
 				continue
 			}
-			n.removeFromRouteList(route)
+			n.removeFromRouteList(*route)
 
 		default:
 			log.Error("Internal error: unknown event type: ", int(evt.Type))

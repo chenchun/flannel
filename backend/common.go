@@ -26,6 +26,7 @@ type ExternalInterface struct {
 	Iface     *net.Interface
 	IfaceAddr net.IP
 	ExtAddr   net.IP
+	Mask      int
 }
 
 // Besides the entry points in the Backend interface, the backend's New()

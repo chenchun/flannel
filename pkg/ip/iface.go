@@ -63,10 +63,10 @@ func GetIfaceIP4Addr(iface *net.Interface) (net.IP, error) {
 	return nil, errors.New("No IPv4 address found for given interface")
 }
 
-func GetIfaceIP4AddrMatch(iface *net.Interface, matchAddr net.IP) error {
+func GetIfaceIP4AddrMatch(iface *net.Interface, matchAddr net.IP) (*net.IPNet, error) {
 	addrs, err := getIfaceAddrs(iface)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	for _, addr := range addrs {
@@ -74,12 +74,12 @@ func GetIfaceIP4AddrMatch(iface *net.Interface, matchAddr net.IP) error {
 		// and assert it is IPv4
 		if addr.IP.To4() != nil {
 			if addr.IP.To4().Equal(matchAddr) {
-				return nil
+				return addr.IPNet, nil
 			}
 		}
 	}
 
-	return errors.New("No IPv4 address found for given interface")
+	return nil, errors.New("No IPv4 address found for given interface")
 }
 
 func GetDefaultGatewayIface() (*net.Interface, error) {
@@ -107,7 +107,7 @@ func GetInterfaceByIP(ip net.IP) (*net.Interface, error) {
 	}
 
 	for _, iface := range ifaces {
-		err := GetIfaceIP4AddrMatch(&iface, ip)
+		_, err := GetIfaceIP4AddrMatch(&iface, ip)
 		if err == nil {
 			return &iface, nil
 		}

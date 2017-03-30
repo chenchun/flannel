@@ -15,6 +15,7 @@
 package ipip
 
 import (
+	"encoding/json"
 	"fmt"
 	"net"
 	"os/exec"
@@ -30,14 +31,14 @@ import (
 )
 
 const (
-	BackendType      = "ipip"
+	backendType      = "ipip"
 	tunnelName       = "tunl0"
 	tunnelMaxMTU     = 1480
 	tunnelDefaultMTU = 1480
 )
 
 func init() {
-	backend.Register(BackendType, New)
+	backend.Register(backendType, New)
 }
 
 type IPIPBackend struct {
@@ -61,15 +62,15 @@ func New(sm subnet.Manager, extIface *backend.ExternalInterface) (backend.Backen
 func (be *IPIPBackend) RegisterNetwork(ctx context.Context, config *subnet.Config) (backend.Network, error) {
 	n := &l3backend.L3Network{
 		Sm:          be.sm,
-		BackendType: BackendType,
+		BackendType: backendType,
 	}
 
-	attrs := subnet.LeaseAttrs{
-		PublicIP:    ip.FromIP(be.extIface.ExtAddr),
-		BackendType: BackendType,
+	attrs, err := newSubnetAttrs(be.extIface.ExtAddr, be.extIface.Mask)
+	if err != nil {
+		return nil, err
 	}
 
-	l, err := be.sm.AcquireLease(ctx, &attrs)
+	l, err := be.sm.AcquireLease(ctx, attrs)
 	switch err {
 	case nil:
 		n.OwnerLease = l
@@ -85,7 +86,28 @@ func (be *IPIPBackend) RegisterNetwork(ctx context.Context, config *subnet.Confi
 		return nil, err
 	}
 	n.DevInfo = dev
-	n.RouteInfo = dev
+	cfg := struct {
+		Hybrid bool
+	}{}
+	if len(config.Backend) > 0 {
+		if err := json.Unmarshal(config.Backend, &cfg); err != nil {
+			return nil, fmt.Errorf("error decoding IPIP backend config: %v", err)
+		}
+	}
+
+	n.GetRoute = func(lease *subnet.Lease) *netlink.Route {
+		route := netlink.Route{
+			Dst:       lease.Subnet.ToIPNet(),
+			Gw:        lease.Attrs.PublicIP.ToIP(),
+			LinkIndex: dev.link.Attrs().Index,
+			Flags:     int(netlink.FLAG_ONLINK),
+		}
+		if cfg.Hybrid && leaseInSameSubnet(lease, n.Lease()) {
+			glog.Infof("configure route to %v direct!", lease.Attrs.PublicIP.String())
+			route.LinkIndex = be.extIface.Iface.Index
+		}
+		return &route
+	}
 
 	/* NB: docker will create the local route to `sn` */
 
@@ -181,6 +203,7 @@ func configureIPIPDevice(lease *subnet.Lease) (*tunnelDev, error) {
 			return nil, err
 		}
 	}
+	glog.Infof("tunnel info dump: %+v", link)
 	return &tunnelDev{link: link}, nil
 }
 
@@ -206,10 +229,42 @@ func (t *tunnelDev) MTU() int {
 	return t.link.Attrs().MTU
 }
 
-func (t *tunnelDev) LinkIndex() int {
-	return t.link.Attrs().Index
+type maskAttrs struct {
+	Mask int
 }
 
-func (t *tunnelDev) Flags() int {
-	return int(netlink.FLAG_ONLINK)
+func newSubnetAttrs(publicIP net.IP, mask int) (*subnet.LeaseAttrs, error) {
+	data, err := json.Marshal(maskAttrs{mask})
+	if err != nil {
+		return nil, err
+	}
+
+	return &subnet.LeaseAttrs{
+		PublicIP:    ip.FromIP(publicIP),
+		BackendType: backendType,
+		BackendData: json.RawMessage(data),
+	}, nil
+}
+
+type routeFunc func(*subnet.Lease) *netlink.Route
+
+func leaseInSameSubnet(a, b *subnet.Lease) bool {
+	if len(a.Attrs.BackendData) == 0 || len(b.Attrs.BackendData) == 0 {
+		return false
+	}
+	maskA := maskAttrs{}
+	maskB := maskAttrs{}
+	if err := json.Unmarshal(a.Attrs.BackendData, &maskA); err != nil {
+		return false
+	}
+	if err := json.Unmarshal(b.Attrs.BackendData, &maskB); err != nil {
+		return false
+	}
+	if maskA.Mask != maskB.Mask {
+		return false
+	}
+	mask := net.CIDRMask(maskA.Mask, 32)
+	ipA := a.Attrs.PublicIP.ToIP().Mask(mask)
+	ipB := b.Attrs.PublicIP.ToIP().Mask(mask)
+	return ipA.Equal(ipB)
 }

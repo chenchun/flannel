@@ -409,6 +409,7 @@ func MonitorLease(ctx context.Context, sm subnet.Manager, bn backend.Network, wg
 func LookupExtIface(ifname string, ifregex string) (*backend.ExternalInterface, error) {
 	var iface *net.Interface
 	var ifaceAddr net.IP
+	var ifaceNet *net.IPNet
 	var err error
 
 	if len(ifname) > 0 {
@@ -444,9 +445,15 @@ func LookupExtIface(ifname string, ifregex string) (*backend.ExternalInterface, 
 				return nil, fmt.Errorf("regex error matching pattern %s to %s", ifregex, ifaceIP.String())
 			}
 
+			ifNet, err := ip.GetIfaceIP4AddrMatch(&ifaceToMatch, ifaceIP)
+			if err != nil {
+				return nil, fmt.Errorf("failed to find ipnet %v for interface %v", ifaceAddr.String(), iface.Name)
+			}
+
 			if matched {
 				ifaceAddr = ifaceIP
 				iface = &ifaceToMatch
+				ifaceNet = ifNet
 				break
 			}
 		}
@@ -482,6 +489,10 @@ func LookupExtIface(ifname string, ifregex string) (*backend.ExternalInterface, 
 		if err != nil {
 			return nil, fmt.Errorf("failed to find IPv4 address for interface %s", iface.Name)
 		}
+		ifaceNet, err = ip.GetIfaceIP4AddrMatch(iface, ifaceAddr)
+		if err != nil {
+			return nil, fmt.Errorf("failed to find ipnet %v for interface %v", ifaceAddr.String(), iface.Name)
+		}
 	}
 
 	log.Infof("Using interface with name %s and address %s", iface.Name, ifaceAddr)
@@ -505,10 +516,12 @@ func LookupExtIface(ifname string, ifregex string) (*backend.ExternalInterface, 
 		extAddr = ifaceAddr
 	}
 
+	ones, _ := ifaceNet.Mask.Size()
 	return &backend.ExternalInterface{
 		Iface:     iface,
 		IfaceAddr: ifaceAddr,
 		ExtAddr:   extAddr,
+		Mask:      ones,
 	}, nil
 }
 
