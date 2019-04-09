@@ -37,7 +37,7 @@ func (n *network) readEgress(ctx context.Context) {
 }
 
 func (n *network) mangleEgress(buf []byte) error {
-	packet := gopacket.NewPacket(buf, layers.LayerTypeIPv4, gopacket.Default)
+	packet := gopacket.NewPacket(buf, layers.LayerTypeIPv4, gopacket.Lazy)
 	ip4Layer := packet.Layer(layers.LayerTypeIPv4)
 	if ip4Layer == nil {
 		return nil
@@ -65,59 +65,32 @@ func (n *network) mangleEgress(buf []byte) error {
 		return fmt.Errorf("can't find routes to dst ip %s", ipPacket.DstIP.String())
 	}
 	dstIP := ipPacket.DstIP
-	proto, l, payload, err := readLayer(packet, ipPacket)
-	if err != nil {
-		return err
-	}
 	sBuf := gopacket.NewSerializeBuffer()
 	if err := gopacket.SerializeLayers(sBuf, gopacket.SerializeOptions{
 		//ComputeChecksums: true,
 		FixLengths: true,
-	}, ipPacket, l, gopacket.Payload(payload)); err != nil {
+	}, ipPacket, gopacket.Payload(ipPacket.Payload)); err != nil {
 		return err
 	}
-	if err := send(sBuf.Bytes(), dstIP, proto); err != nil {
+	if err := send(sBuf.Bytes(), dstIP, ipPacket.Protocol); err != nil {
 		return fmt.Errorf("failed to send mangled egress packets: %v", err)
 	}
 	return nil
 }
 
-func readLayer(packet gopacket.Packet, ipPacket *layers.IPv4) (int, gopacket.SerializableLayer, []byte, error) {
-	var proto int
-	var l gopacket.SerializableLayer
-	var payload []byte
-	if tcpLayer := packet.Layer(layers.LayerTypeTCP); tcpLayer != nil {
-		tcpPacket, _ := tcpLayer.(*layers.TCP)
-		//glog.V(5).Infof("TCP From %s:%d to %s:%d", ipPacket.SrcIP.String(), tcpPacket.SrcPort, ipPacket.DstIP.String(), tcpPacket.DstPort)
-		if err := tcpPacket.SetNetworkLayerForChecksum(ipPacket); err != nil {
-			return proto, l, payload, err
-		}
-		l = tcpPacket
-		proto = syscall.IPPROTO_TCP
-		payload = tcpPacket.Payload
-	} else if udpLayer := packet.Layer(layers.LayerTypeUDP); udpLayer != nil {
-		udpPacket, _ := udpLayer.(*layers.UDP)
-		//glog.V(5).Infof("UDP From %s:%d to %s:%d", ipPacket.SrcIP.String(), udpPacket.SrcPort, ipPacket.DstIP.String(), udpPacket.DstPort)
-		if err := udpPacket.SetNetworkLayerForChecksum(ipPacket); err != nil {
-			return proto, l, payload, err
-		}
-		l = udpPacket
-		proto = syscall.IPPROTO_UDP
-		payload = udpPacket.Payload
-	} else if icmpLayer := packet.Layer(layers.LayerTypeICMPv4); icmpLayer != nil {
-		icmpPacket, _ := icmpLayer.(*layers.ICMPv4)
-		//glog.V(5).Infof("ICMP From %s:%d to %s:%d", ipPacket.SrcIP.String(), ipPacket.DstIP.String())
-		l = icmpPacket
-		proto = syscall.IPPROTO_RAW
-		payload = icmpPacket.Payload
-	} else {
-		return proto, l, payload, fmt.Errorf("unknow packet layer")
+func send(data []byte, dstIP net.IP, proto layers.IPProtocol) error {
+	var protocol int
+	switch proto {
+	case layers.IPProtocolTCP:
+		protocol = syscall.IPPROTO_TCP
+	case layers.IPProtocolUDP:
+		protocol = syscall.IPPROTO_UDP
+	case layers.IPProtocolICMPv4:
+		protocol = syscall.IPPROTO_RAW
+	default:
+		return fmt.Errorf("unknow packet protocol %v", proto)
 	}
-	return proto, l, payload, nil
-}
-
-func send(data []byte, dstIP net.IP, proto int) error {
-	sock, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_RAW, proto)
+	sock, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_RAW, protocol)
 	if err != nil {
 		return err
 	}
@@ -160,7 +133,7 @@ func (n *network) readIngress(ctx context.Context, proto int) {
 }
 
 func (n *network) mangleIngress(buf []byte) error {
-	packet := gopacket.NewPacket(buf, layers.LayerTypeIPv4, gopacket.Default)
+	packet := gopacket.NewPacket(buf, layers.LayerTypeIPv4, gopacket.Lazy)
 	ip4Layer := packet.Layer(layers.LayerTypeIPv4)
 	if ip4Layer == nil {
 		return nil
@@ -179,18 +152,14 @@ func (n *network) mangleIngress(buf []byte) error {
 	ipPacket.Options = nil
 	ipPacket.DstIP = opt.DstIP
 	ipPacket.SrcIP = opt.SrcIP
-	proto, l, payload, err := readLayer(packet, ipPacket)
-	if err != nil {
-		return err
-	}
 	sBuf := gopacket.NewSerializeBuffer()
 	if err := gopacket.SerializeLayers(sBuf, gopacket.SerializeOptions{
 		//ComputeChecksums: true,
 		FixLengths: true,
-	}, ipPacket, l, gopacket.Payload(payload)); err != nil {
+	}, ipPacket, gopacket.Payload(ipPacket.Payload)); err != nil {
 		return err
 	}
-	if err := send(sBuf.Bytes(), opt.DstIP, proto); err != nil {
+	if err := send(sBuf.Bytes(), opt.DstIP, ipPacket.Protocol); err != nil {
 		return err
 	}
 	return nil
