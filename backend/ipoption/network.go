@@ -26,6 +26,8 @@ type network struct {
 	Network     *net.IPNet
 	TunFd       *os.File
 	tempIP      []byte
+
+	tcpSocket, udpSocket, icmpSocket int
 }
 
 func newNetwork(subnetLease *subnet.Lease, extIface *backend.ExternalInterface, sm subnet.Manager, n ip.IP4Net) *network {

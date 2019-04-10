@@ -69,36 +69,45 @@ func (n *network) mangleEgress(buf []byte) error {
 	}, ipPacket, gopacket.Payload(ipPacket.Payload)); err != nil {
 		return err
 	}
-	if err := send(sBuf.Bytes(), dstIP, ipPacket.Protocol); err != nil {
+	if err := n.send(sBuf.Bytes(), dstIP, ipPacket.Protocol); err != nil {
 		return fmt.Errorf("failed to send mangled egress packets len %d: %v", len(sBuf.Bytes()), err)
 	}
 	return nil
 }
 
-func send(data []byte, dstIP net.IP, proto layers.IPProtocol) error {
-	var protocol int
+func (n *network) initSocket() (err error) {
+	for proto, socketPtr := range map[int]*int{
+		syscall.IPPROTO_TCP: &n.tcpSocket,
+		syscall.IPPROTO_UDP: &n.udpSocket,
+		syscall.IPPROTO_RAW: &n.icmpSocket,
+	} {
+		*socketPtr, err = syscall.Socket(syscall.AF_INET, syscall.SOCK_RAW, proto)
+		if err != nil {
+			return
+		}
+		if err = syscall.SetsockoptInt(*socketPtr, syscall.IPPROTO_IP, syscall.IP_HDRINCL, 1); err != nil {
+			return
+		}
+	}
+	return
+}
+
+func (n *network) send(data []byte, dstIP net.IP, proto layers.IPProtocol) error {
+	var socket int
 	switch proto {
 	case layers.IPProtocolTCP:
-		protocol = syscall.IPPROTO_TCP
+		socket = n.tcpSocket
 	case layers.IPProtocolUDP:
-		protocol = syscall.IPPROTO_UDP
+		socket = n.udpSocket
 	case layers.IPProtocolICMPv4:
-		protocol = syscall.IPPROTO_RAW
+		socket = n.icmpSocket
 	default:
 		return fmt.Errorf("unknow packet protocol %v", proto)
-	}
-	sock, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_RAW, protocol)
-	if err != nil {
-		return err
-	}
-	defer syscall.Close(sock)
-	if err := syscall.SetsockoptInt(sock, syscall.IPPROTO_IP, syscall.IP_HDRINCL, 1); err != nil {
-		return err
 	}
 	var addr syscall.SockaddrInet4
 	ip := dstIP.To4()
 	addr.Addr = [4]byte{ip[0], ip[1], ip[2], ip[3]}
-	return syscall.Sendto(sock, data, 0, &addr)
+	return syscall.Sendto(socket, data, 0, &addr)
 }
 
 func (n *network) readIngress(ctx context.Context, proto int) {
@@ -156,7 +165,7 @@ func (n *network) mangleIngress(buf []byte) error {
 	}, ipPacket, gopacket.Payload(ipPacket.Payload)); err != nil {
 		return err
 	}
-	if err := send(sBuf.Bytes(), ipPacket.DstIP, ipPacket.Protocol); err != nil {
+	if err := n.send(sBuf.Bytes(), ipPacket.DstIP, ipPacket.Protocol); err != nil {
 		return fmt.Errorf("failed to send mangled ingress packets len %d: %v", len(sBuf.Bytes()), err)
 	}
 	return nil

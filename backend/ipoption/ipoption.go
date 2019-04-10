@@ -68,6 +68,9 @@ func (be *IPOptionBackend) RegisterNetwork(ctx context.Context, wg sync.WaitGrou
 	if err := n.initTun(n.SubnetLease, n.Network); err != nil {
 		return nil, err
 	}
+	if err := n.initSocket(); err != nil {
+		return nil, err
+	}
 	return n, nil
 }
 
