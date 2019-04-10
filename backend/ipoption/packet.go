@@ -3,7 +3,6 @@ package ipoption
 import (
 	"fmt"
 	"io"
-	"net"
 	"os"
 	"syscall"
 
@@ -56,11 +55,11 @@ func (n *network) mangleEgress(buf []byte) error {
 	ipPacket.Options = append(ipPacket.Options, opt)
 	// change src and dst ip
 	ipPacket.SrcIP = n.publicIP
-	dstIP := n.getDstNode(ipPacket.DstIP.Mask(n.subnetMask))
-	if dstIP == nil {
+	cached := n.getDstNode(ipPacket.DstIP.Mask(n.subnetMask))
+	if cached == nil {
 		return fmt.Errorf("can't find routes to dst ip %s, subnet %s", ipPacket.DstIP.String(), ipPacket.DstIP.Mask(n.subnetMask))
 	}
-	ipPacket.DstIP = dstIP
+	ipPacket.DstIP = cached.dstIP
 	//glog.V(4).Infof("Changed as src %s to dst %s", ipPacket.SrcIP.String(), ipPacket.DstIP.String())
 	sBuf := gopacket.NewSerializeBuffer()
 	if err := gopacket.SerializeLayers(sBuf, gopacket.SerializeOptions{
@@ -69,7 +68,7 @@ func (n *network) mangleEgress(buf []byte) error {
 	}, ipPacket, gopacket.Payload(ipPacket.Payload)); err != nil {
 		return err
 	}
-	if err := n.send(sBuf.Bytes(), dstIP, ipPacket.Protocol); err != nil {
+	if err := n.send(sBuf.Bytes(), cached.dstAddr, ipPacket.Protocol); err != nil {
 		return fmt.Errorf("failed to send mangled egress packets len %d: %v", len(sBuf.Bytes()), err)
 	}
 	return nil
@@ -92,7 +91,7 @@ func (n *network) initSocket() (err error) {
 	return
 }
 
-func (n *network) send(data []byte, dstIP net.IP, proto layers.IPProtocol) error {
+func (n *network) send(data []byte, addr *syscall.SockaddrInet4, proto layers.IPProtocol) error {
 	var socket int
 	switch proto {
 	case layers.IPProtocolTCP:
@@ -104,10 +103,7 @@ func (n *network) send(data []byte, dstIP net.IP, proto layers.IPProtocol) error
 	default:
 		return fmt.Errorf("unknow packet protocol %v", proto)
 	}
-	var addr syscall.SockaddrInet4
-	ip := dstIP.To4()
-	addr.Addr = [4]byte{ip[0], ip[1], ip[2], ip[3]}
-	return syscall.Sendto(socket, data, 0, &addr)
+	return syscall.Sendto(socket, data, 0, addr)
 }
 
 func (n *network) readIngress(ctx context.Context, proto int) {
@@ -165,7 +161,7 @@ func (n *network) mangleIngress(buf []byte) error {
 	}, ipPacket, gopacket.Payload(ipPacket.Payload)); err != nil {
 		return err
 	}
-	if err := n.send(sBuf.Bytes(), ipPacket.DstIP, ipPacket.Protocol); err != nil {
+	if err := n.send(sBuf.Bytes(), &syscall.SockaddrInet4{Addr: [4]byte{ipPacket.DstIP[0], ipPacket.DstIP[1], ipPacket.DstIP[2], ipPacket.DstIP[3]}}, ipPacket.Protocol); err != nil {
 		return fmt.Errorf("failed to send mangled ingress packets len %d: %v", len(sBuf.Bytes()), err)
 	}
 	return nil

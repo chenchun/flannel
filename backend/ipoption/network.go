@@ -97,21 +97,28 @@ func (n *network) Run(ctx context.Context) {
 	}
 }
 
+type cachedObj struct {
+	dstAddr *syscall.SockaddrInet4
+	dstIP   net.IP
+}
+
 func (n *network) addLease(lease *subnet.Lease) {
-	n.subnetsMap.Store(lease.Subnet.IP, lease.Attrs.PublicIP.ToIP())
+	obj := cachedObj{dstIP: lease.Attrs.PublicIP.ToIP().To4()}
+	obj.dstAddr = &syscall.SockaddrInet4{Addr: [4]byte{obj.dstIP[0], obj.dstIP[1], obj.dstIP[2], obj.dstIP[3]}}
+	n.subnetsMap.Store(lease.Subnet.IP, &obj)
 }
 
 func (n *network) delLease(lease *subnet.Lease) {
 	n.subnetsMap.Delete(lease.Subnet.IP)
 }
 
-func (n *network) getDstNode(subnetIP net.IP) net.IP {
+func (n *network) getDstNode(subnetIP net.IP) *cachedObj {
 	if subnetIP == nil {
 		return nil
 	}
 	l, ok := n.subnetsMap.Load(ip.FromIP(subnetIP))
 	if ok {
-		return l.(net.IP)
+		return l.(*cachedObj)
 	}
 	return nil
 }
