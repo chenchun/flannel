@@ -19,60 +19,78 @@ type Option struct {
 	Mask  net.IPMask
 	SrcIP net.IP
 	DstIP net.IP
+
+	// for speed up encoding
+	prefix    uint
+	shiftBits uint
+
+	// for speed up decoding
+	prefixBits []byte
+	numBytes   int
 }
 
 func NewOption(mask net.IPMask, src, dst net.IP) *Option {
-	srcIP, dstIP := make([]byte, 4), make([]byte, 4)
-	copy(srcIP, src.To4())
-	copy(dstIP, dst.To4())
-	return &Option{Mask: mask, SrcIP: srcIP, DstIP: dstIP}
+	opt := New(&net.IPNet{IP: src, Mask: mask})
+	copy(opt.SrcIP, src.To4())
+	copy(opt.DstIP, dst.To4())
+	return opt
+}
+
+func New(cidr *net.IPNet) *Option {
+	ones, _ := cidr.Mask.Size()
+	srcIP, dstIP, temp := make([]byte, 4), make([]byte, 4), make([]byte, 4)
+	copy(temp, cidr.IP.To4())
+	prefixBits := GenPrefixBits(&net.IPNet{IP: temp, Mask: cidr.Mask})
+	copy(srcIP, prefixBits)
+	copy(dstIP, prefixBits)
+	return &Option{
+		SrcIP:      srcIP,
+		DstIP:      dstIP,
+		Mask:       cidr.Mask,
+		prefix:     uint(ones),
+		shiftBits:  (32 - uint(ones) - 8 + subnetBits) % 8,
+		prefixBits: prefixBits,
+		numBytes:   int(math.Ceil(float64(subnetBits+(32-ones)*2) / 8)),
+	}
 }
 
 // EncodeOptionData encodes two ips as bytes array
 // input mask is always 0 <= <= 31
-func EncodeOptionData(d *Option) []byte {
-	ones, _ := d.Mask.Size()
-	b1 := byte(ones) << 3
+func (d *Option) EncodeOptionData(src, dst net.IP) []byte {
+	b1 := byte(d.prefix) << 3
 	// copy 3 high bits of ip1 to the low bits of b1
-	suffix1 := ShiftBytesLeft(d.SrcIP.To4(), uint(ones))
-	suffix2 := ShiftBytesLeft(d.DstIP.To4(), uint(ones))
+	suffix1 := ShiftBytesLeft(src.To4(), d.prefix)
+	suffix2 := ShiftBytesLeft(dst.To4(), d.prefix)
 	b1 = b1 | (suffix1[0] >> subnetBits)
 	suffix1 = ShiftBytesLeft(suffix1, 8-subnetBits)
-	shiftBits := (32 - uint(ones) - 8 + subnetBits) % 8
-	suffix1[len(suffix1)-1] |= suffix2[0] >> shiftBits
-	suffix2 = ShiftBytesLeft(suffix2, 8-shiftBits)
+	suffix1[len(suffix1)-1] |= suffix2[0] >> d.shiftBits
+	suffix2 = ShiftBytesLeft(suffix2, 8-d.shiftBits)
 	return append(append([]byte{b1}, suffix1...), suffix2...)
 }
 
-func DecodeOptionData(data, prefixBits []byte) (*Option, error) {
+func (d *Option) DecodeOptionData(data []byte) error {
 	if len(data) == 0 {
-		return nil, fmt.Errorf("empty data")
+		return fmt.Errorf("empty data")
 	}
-	ones := int(data[0] >> (8 - subnetBits))
-	numBytes := int(math.Ceil(float64(subnetBits+(32-ones)*2) / 8))
-	if numBytes != len(data) {
-		return nil, fmt.Errorf("invalid data %v, expect %d bytes", data, numBytes)
+	if d.numBytes != len(data) {
+		return fmt.Errorf("invalid data %v, expect %d bytes", data, d.numBytes)
 	}
-	opt := &Option{Mask: net.CIDRMask(ones, 32)}
-	ip1, ip2, temp := make([]byte, 4), make([]byte, 4), make([]byte, len(data))
-	copy(ip1, prefixBits)
-	copy(ip2, prefixBits)
+	// TODO don't make a new array
+	temp := make([]byte, len(data)+9)
 	copy(temp, data)
 	// shift right ones bits
-	temp = append(temp, make([]byte, 9)...)
 	temp = ShiftBytesRight(temp, 3)
 	temp = temp[1:]
-	temp = ShiftBytesRight(temp, uint(ones%8))
-	ipBytes := int(math.Ceil(float64(32-ones) / 8))
+	temp = ShiftBytesRight(temp, d.prefix%8)
+	ipBytes := int(math.Ceil(float64(32-d.prefix) / 8))
 	for i := 4 - ipBytes; i < 4; i++ {
-		ip1[i] |= temp[i-4+ipBytes]
+		d.SrcIP[i] |= temp[i-4+ipBytes]
 	}
-	temp = ShiftBytesRight(temp[ipBytes:], uint(ones%8))
+	temp = ShiftBytesRight(temp[ipBytes:], d.prefix%8)
 	for i := 4 - ipBytes; i < 4; i++ {
-		ip2[i] |= temp[i-4+ipBytes]
+		d.DstIP[i] |= temp[i-4+ipBytes]
 	}
-	opt.SrcIP, opt.DstIP = net.IP(ip1), net.IP(ip2)
-	return opt, nil
+	return nil
 }
 
 // ShiftBytesLeft shift `a` left by `bits` bits and shrink the len of `a` accordingly

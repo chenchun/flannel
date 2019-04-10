@@ -16,31 +16,34 @@ import (
 
 type network struct {
 	backend.SimpleNetwork
-	SM          subnet.Manager
-	subnetsMap  *sync.Map
-	networkMask net.IPMask
-	subnetMask  net.IPMask
-	publicIP    net.IP
-	prefixBits  []byte
+	SM         subnet.Manager
+	subnetsMap *sync.Map
 
-	Network *net.IPNet
-	TunFd   *os.File
+	subnetMask  net.IPMask
+	subnetIPNet *net.IPNet
+	publicIP    net.IP
+	opt         *option.Option
+	Network     *net.IPNet
+	TunFd       *os.File
+	tempIP      []byte
 }
 
 func newNetwork(subnetLease *subnet.Lease, extIface *backend.ExternalInterface, sm subnet.Manager, n ip.IP4Net) *network {
-	return &network{
+	net := &network{
 		SimpleNetwork: backend.SimpleNetwork{
 			SubnetLease: subnetLease,
 			ExtIface:    extIface,
 		},
 		SM:          sm,
 		publicIP:    subnetLease.Attrs.PublicIP.ToIP(),
-		networkMask: n.ToIPNet().Mask,
 		subnetMask:  subnetLease.Subnet.ToIPNet().Mask,
-		prefixBits:  option.GenPrefixBits(n.ToIPNet()),
+		subnetIPNet: subnetLease.Subnet.ToIPNet(),
 		subnetsMap:  &sync.Map{},
 		Network:     n.ToIPNet(),
+		tempIP:      make([]byte, 4),
 	}
+	net.opt = option.New(n.ToIPNet())
+	return net
 }
 
 func (n *network) Run(ctx context.Context) {

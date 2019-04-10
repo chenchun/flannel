@@ -67,22 +67,31 @@ func TestShiftBytesRight(t *testing.T) {
 	}
 }
 
+func cidr(str string) *net.IPNet {
+	ip, subnet, err := net.ParseCIDR(str)
+	if err != nil {
+		return nil
+	}
+	subnet.IP = ip
+	return subnet
+}
+
 func TestEncodeOptionData(t *testing.T) {
-	data := EncodeOptionData(NewOption(net.IPv4Mask(255, 255, 255, 0), net.ParseIP("192.168.0.1"), net.ParseIP("192.168.0.2")))
+	data := New(cidr("192.168.0.1/24")).EncodeOptionData(net.ParseIP("192.168.0.1"), net.ParseIP("192.168.0.2"))
 	// 0b 11000  0000 0001  0000 0010
 	// 0b 1100 0000 0000 1000 0001 0
 	if !reflect.DeepEqual(data, []byte{0xc0, 0x08, 0x10}) {
 		t.Fatal(data)
 	}
 
-	data = EncodeOptionData(NewOption(net.IPv4Mask(255, 255, 0, 0), net.ParseIP("192.168.1.1"), net.ParseIP("192.168.2.2")))
+	data = New(cidr("192.168.0.1/16")).EncodeOptionData(net.ParseIP("192.168.1.1"), net.ParseIP("192.168.2.2"))
 	// 0b 10000  0000 0001 0000 0001  0000 0010 0000 0010
 	// 0b 1000 0000 0000 1000 0000 1000 0001 0000 0001 0
 	if !reflect.DeepEqual(data, []byte{0x80, 0x08, 0x08, 0x10, 0x10}) {
 		t.Fatal(data)
 	}
 
-	data = EncodeOptionData(&Option{Mask: net.CIDRMask(18, 32), SrcIP: net.ParseIP("192.168.193.2"), DstIP: net.ParseIP("192.168.194.2")})
+	data = New(cidr("192.168.192.0/18")).EncodeOptionData(net.ParseIP("192.168.193.2"), net.ParseIP("192.168.194.2"))
 	// 0b 10010 00 0001 0000 0010 00 0010 0000 0010
 	// 0b 1001 0000 0010 0000 0100 0001 0000 0001 0
 	if !reflect.DeepEqual(data, []byte{0x90, 0x20, 0x41, 0x01, 0x00}) {
@@ -91,24 +100,23 @@ func TestEncodeOptionData(t *testing.T) {
 }
 
 func TestDecodeOptionData(t *testing.T) {
-	opt, err := DecodeOptionData([]byte{0xc0, 0x08, 0x10}, []byte{0x01, 0x01, 0x02})
-	if err != nil {
+	opt := New(&net.IPNet{IP: net.ParseIP("1.1.2.1"), Mask: net.CIDRMask(24, 32)})
+	if err := opt.DecodeOptionData([]byte{0xc0, 0x08, 0x10}); err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(opt, NewOption(net.IPv4Mask(255, 255, 255, 0), net.ParseIP("1.1.2.1").To4(), net.ParseIP("1.1.2.2").To4())) {
+	if !reflect.DeepEqual(opt, NewOption(net.CIDRMask(24, 32), net.ParseIP("1.1.2.1").To4(), net.ParseIP("1.1.2.2").To4())) {
 		t.Fatal(opt)
 	}
 
-	opt, err = DecodeOptionData([]byte{0x80, 0x08, 0x08, 0x10, 0x10}, []byte{0x01, 0x03})
-	if err != nil {
+	opt = New(&net.IPNet{IP: net.ParseIP("1.3.0.0"), Mask: net.CIDRMask(16, 32)})
+	if err := opt.DecodeOptionData([]byte{0x80, 0x08, 0x08, 0x10, 0x10}); err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(opt, NewOption(net.IPv4Mask(255, 255, 0, 0), net.ParseIP("1.3.1.1").To4(), net.ParseIP("1.3.2.2").To4())) {
+	if !reflect.DeepEqual(opt, NewOption(net.CIDRMask(16, 32), net.ParseIP("1.3.1.1").To4(), net.ParseIP("1.3.2.2").To4())) {
 		t.Fatal(opt)
 	}
 
-	opt, err = DecodeOptionData([]byte{0x80, 0x08, 0x08, 0x10}, []byte{0x01, 0x03})
-	if err == nil {
+	if err := opt.DecodeOptionData([]byte{0x80, 0x08, 0x08, 0x10}); err == nil {
 		t.Fatal("expect bad data, len is not correct")
 	}
 
@@ -117,8 +125,8 @@ func TestDecodeOptionData(t *testing.T) {
 	// 10010 00 0001 0000 0010 00 0010 0000 0010
 	// 1001 0000 0010 0000 0100 0001 0000 0001 0
 	// prefixBits = 0xc0 0xa8 0xc0
-	opt, err = DecodeOptionData([]byte{0x90, 0x20, 0x41, 0x01, 0x00}, []byte{0xc0, 0xa8, 0xc0})
-	if err != nil {
+	opt = New(&net.IPNet{IP: net.ParseIP("192.168.195.2"), Mask: net.CIDRMask(18, 32)})
+	if err := opt.DecodeOptionData([]byte{0x90, 0x20, 0x41, 0x01, 0x00}); err != nil {
 		t.Fatal(err)
 	}
 	if !reflect.DeepEqual(opt, NewOption(net.CIDRMask(18, 32), net.ParseIP("192.168.193.2").To4(), net.ParseIP("192.168.194.2").To4())) {

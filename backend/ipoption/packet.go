@@ -15,9 +15,10 @@ import (
 )
 
 func (n *network) readEgress(ctx context.Context) {
-	buf := make([]byte, 1600)
+	buf := make([]byte, n.MTU())
 	glog.Infof("begin reading egress")
 	for {
+		//TODO clean buf?
 		select {
 		case <-ctx.Done():
 			return
@@ -43,28 +44,24 @@ func (n *network) mangleEgress(buf []byte) error {
 		return nil
 	}
 	ipPacket, _ := ip4Layer.(*layers.IPv4)
-	// ignore none overlay packets
-	if !n.Network.Contains(ipPacket.SrcIP) || !n.Network.Contains(ipPacket.DstIP) {
-		return nil
-	}
 	// ignore traffic between containers on this host
-	if n.SubnetLease.Subnet.ToIPNet().Contains(ipPacket.DstIP) {
+	if n.subnetIPNet.Contains(ipPacket.DstIP) {
 		return nil
 	}
 	//glog.V(4).Infof("From src %s to dst %s", ipPacket.SrcIP.String(), ipPacket.DstIP.String())
 	// encoding original container ips
-	optData := option.EncodeOptionData(option.NewOption(n.networkMask, ipPacket.SrcIP, ipPacket.DstIP))
-	opt := layers.IPv4Option{OptionType: option.IPOptionType, OptionData: optData}
+	copy(n.tempIP, ipPacket.DstIP.To4())
+	opt := layers.IPv4Option{OptionType: option.IPOptionType, OptionData: n.opt.EncodeOptionData(ipPacket.SrcIP, n.tempIP)}
 	opt.OptionLength = uint8(len(opt.OptionData)) + 2
 	ipPacket.Options = append(ipPacket.Options, opt)
 	// change src and dst ip
 	ipPacket.SrcIP = n.publicIP
-	ipPacket.DstIP = n.getDstNode(ipPacket.DstIP.Mask(n.subnetMask))
-	//glog.V(4).Infof("Changed as src %s to dst %s", ipPacket.SrcIP.String(), ipPacket.DstIP.String())
-	if ipPacket.DstIP == nil {
-		return fmt.Errorf("can't find routes to dst ip %s", ipPacket.DstIP.String())
+	dstIP := n.getDstNode(ipPacket.DstIP.Mask(n.subnetMask))
+	if dstIP == nil {
+		return fmt.Errorf("can't find routes to dst ip %s, subnet %s", ipPacket.DstIP.String(), ipPacket.DstIP.Mask(n.subnetMask))
 	}
-	dstIP := ipPacket.DstIP
+	ipPacket.DstIP = dstIP
+	//glog.V(4).Infof("Changed as src %s to dst %s", ipPacket.SrcIP.String(), ipPacket.DstIP.String())
 	sBuf := gopacket.NewSerializeBuffer()
 	if err := gopacket.SerializeLayers(sBuf, gopacket.SerializeOptions{
 		//ComputeChecksums: true,
@@ -73,7 +70,7 @@ func (n *network) mangleEgress(buf []byte) error {
 		return err
 	}
 	if err := send(sBuf.Bytes(), dstIP, ipPacket.Protocol); err != nil {
-		return fmt.Errorf("failed to send mangled egress packets: %v", err)
+		return fmt.Errorf("failed to send mangled egress packets len %d: %v", len(sBuf.Bytes()), err)
 	}
 	return nil
 }
@@ -114,13 +111,14 @@ func (n *network) readIngress(ctx context.Context, proto int) {
 	f := os.NewFile(uintptr(fd), fmt.Sprintf("fd %d", fd))
 
 	glog.Infof("begin reading ingress")
+	buf := make([]byte, n.MTU())
 	for {
+		//TODO clean buf?
 		select {
 		case <-ctx.Done():
 			return
 		default:
 		}
-		buf := make([]byte, 1600)
 		_, err := f.Read(buf)
 		if err != nil {
 			fmt.Println(err)
@@ -144,14 +142,13 @@ func (n *network) mangleIngress(buf []byte) error {
 		// TODO Did we steel the packet from kernel ? do we need to send it ?
 		return nil
 	}
-	opt, err := option.DecodeOptionData(ipPacket.Options[0].OptionData, n.prefixBits)
-	if err != nil {
+	if err := n.opt.DecodeOptionData(ipPacket.Options[0].OptionData); err != nil {
 		return err
 	}
-	glog.V(4).Infof("From src ip %s to dst ip %s, options %v, decoded to %v", ipPacket.SrcIP.String(), ipPacket.DstIP.String(), ipPacket.Options, opt)
+	//glog.V(4).Infof("From src ip %s to dst ip %s, options %v, decoded to %v", ipPacket.SrcIP.String(), ipPacket.DstIP.String(), ipPacket.Options, n.opt)
 	ipPacket.Options = nil
-	ipPacket.DstIP = opt.DstIP
-	ipPacket.SrcIP = opt.SrcIP
+	ipPacket.DstIP = n.opt.DstIP
+	ipPacket.SrcIP = n.opt.SrcIP
 	sBuf := gopacket.NewSerializeBuffer()
 	if err := gopacket.SerializeLayers(sBuf, gopacket.SerializeOptions{
 		//ComputeChecksums: true,
@@ -159,8 +156,8 @@ func (n *network) mangleIngress(buf []byte) error {
 	}, ipPacket, gopacket.Payload(ipPacket.Payload)); err != nil {
 		return err
 	}
-	if err := send(sBuf.Bytes(), opt.DstIP, ipPacket.Protocol); err != nil {
-		return err
+	if err := send(sBuf.Bytes(), ipPacket.DstIP, ipPacket.Protocol); err != nil {
+		return fmt.Errorf("failed to send mangled ingress packets len %d: %v", len(sBuf.Bytes()), err)
 	}
 	return nil
 }
