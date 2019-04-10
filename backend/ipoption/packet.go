@@ -17,19 +17,18 @@ func (n *network) readEgress(ctx context.Context) {
 	buf := make([]byte, 1500) // short be 1500
 	glog.Infof("begin reading egress")
 	for {
-		//TODO clean buf?
 		select {
 		case <-ctx.Done():
 			return
 		default:
 		}
-		_, err := n.TunFd.Read(buf)
+		num, err := n.TunFd.Read(buf)
 		if err != nil {
 			if err != io.EOF {
 				glog.Fatal(err)
 			}
 		}
-		err = n.mangleEgress(buf)
+		err = n.mangleEgress(buf[:num])
 		if err != nil {
 			glog.Warning(err)
 		}
@@ -118,17 +117,16 @@ func (n *network) readIngress(ctx context.Context, proto int) {
 	glog.Infof("begin reading ingress")
 	buf := make([]byte, 1500)
 	for {
-		//TODO clean buf?
 		select {
 		case <-ctx.Done():
 			return
 		default:
 		}
-		_, err := f.Read(buf)
+		num, err := f.Read(buf)
 		if err != nil {
 			fmt.Println(err)
 		}
-		err = n.mangleIngress(buf)
+		err = n.mangleIngress(buf[:num])
 		if err != nil {
 			glog.Warning(err)
 		}
