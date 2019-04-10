@@ -115,7 +115,7 @@ func (n *network) getDstNode(subnetIP net.IP) net.IP {
 }
 
 func (n *network) MTU() int {
-	return n.ExtIface.Iface.MTU
+	return n.ExtIface.Iface.MTU - int(n.opt.OptLen())
 }
 
 func (n *network) handleSubnetEvents(batch []subnet.Event) {

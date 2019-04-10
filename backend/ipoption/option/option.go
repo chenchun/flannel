@@ -26,7 +26,7 @@ type Option struct {
 
 	// for speed up decoding
 	prefixBits []byte
-	numBytes   int
+	numBytes   uint8
 }
 
 func NewOption(mask net.IPMask, src, dst net.IP) *Option {
@@ -50,7 +50,7 @@ func New(cidr *net.IPNet) *Option {
 		prefix:     uint(ones),
 		shiftBits:  (32 - uint(ones) - 8 + subnetBits) % 8,
 		prefixBits: prefixBits,
-		numBytes:   int(math.Ceil(float64(subnetBits+(32-ones)*2) / 8)),
+		numBytes:   uint8(math.Ceil(float64(subnetBits+(32-ones)*2) / 8)),
 	}
 }
 
@@ -72,7 +72,7 @@ func (d *Option) DecodeOptionData(data []byte) error {
 	if len(data) == 0 {
 		return fmt.Errorf("empty data")
 	}
-	if d.numBytes != len(data) {
+	if d.numBytes != uint8(len(data)) {
 		return fmt.Errorf("invalid data %v, expect %d bytes", data, d.numBytes)
 	}
 	// TODO don't make a new array
@@ -91,6 +91,11 @@ func (d *Option) DecodeOptionData(data []byte) error {
 		d.DstIP[i] |= temp[i-4+ipBytes]
 	}
 	return nil
+}
+
+func (d *Option) OptLen() uint8 {
+	// 2 extra bytes for Option type and Option len
+	return d.numBytes + 2
 }
 
 // ShiftBytesLeft shift `a` left by `bits` bits and shrink the len of `a` accordingly

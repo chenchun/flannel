@@ -15,7 +15,7 @@ import (
 )
 
 func (n *network) readEgress(ctx context.Context) {
-	buf := make([]byte, n.MTU())
+	buf := make([]byte, 1500) // short be 1500
 	glog.Infof("begin reading egress")
 	for {
 		//TODO clean buf?
@@ -52,7 +52,7 @@ func (n *network) mangleEgress(buf []byte) error {
 	// encoding original container ips
 	copy(n.tempIP, ipPacket.DstIP.To4())
 	opt := layers.IPv4Option{OptionType: option.IPOptionType, OptionData: n.opt.EncodeOptionData(ipPacket.SrcIP, n.tempIP)}
-	opt.OptionLength = uint8(len(opt.OptionData)) + 2
+	opt.OptionLength = n.opt.OptLen()
 	ipPacket.Options = append(ipPacket.Options, opt)
 	// change src and dst ip
 	ipPacket.SrcIP = n.publicIP
@@ -111,7 +111,7 @@ func (n *network) readIngress(ctx context.Context, proto int) {
 	f := os.NewFile(uintptr(fd), fmt.Sprintf("fd %d", fd))
 
 	glog.Infof("begin reading ingress")
-	buf := make([]byte, n.MTU())
+	buf := make([]byte, 1500)
 	for {
 		//TODO clean buf?
 		select {
