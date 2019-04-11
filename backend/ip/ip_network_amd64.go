@@ -33,7 +33,7 @@ import (
 )
 
 const (
-	encapOverhead = 10 // 10 bytes IP option
+	encapOverhead = 12 // 12 bytes IP option
 )
 
 type network struct {
@@ -47,6 +47,7 @@ type network struct {
 	sm     subnet.Manager
 
 	tcpSocket, udpSocket, icmpSocket int
+	icmpRecv int
 }
 
 func newNetwork(sm subnet.Manager, extIface *backend.ExternalInterface, port int, nw ip.IP4Net, l *subnet.Lease) (*network, error) {
@@ -86,6 +87,7 @@ func (n *network) Run(ctx context.Context) {
 		syscall.Close(n.tcpSocket)
 		syscall.Close(n.udpSocket)
 		syscall.Close(n.icmpSocket)
+		syscall.Close(n.icmpRecv)
 	}()
 
 	// one for each goroutine below
@@ -94,7 +96,7 @@ func (n *network) Run(ctx context.Context) {
 
 	wg.Add(1)
 	go func() {
-		runCProxy(n.tun, n.tcpSocket, n.udpSocket, n.icmpSocket, n.ctl2, n.tunNet.IP, n.SubnetLease.Attrs.PublicIP, n.ExtIface.Iface.MTU, encapOverhead)
+		runCProxy(n.tun, n.tcpSocket, n.udpSocket, n.icmpSocket, n.icmpRecv, n.ctl2, n.tunNet.IP, n.SubnetLease.Attrs.PublicIP, n.ExtIface.Iface.MTU, encapOverhead)
 		wg.Done()
 	}()
 
@@ -213,6 +215,7 @@ func (n *network) initSocket() (err error) {
 		syscall.IPPROTO_TCP: &n.tcpSocket,
 		syscall.IPPROTO_UDP: &n.udpSocket,
 		syscall.IPPROTO_RAW: &n.icmpSocket,
+		syscall.IPPROTO_ICMP: &n.icmpRecv,
 	} {
 		*socketPtr, err = syscall.Socket(syscall.AF_INET, syscall.SOCK_RAW, proto)
 		if err != nil {

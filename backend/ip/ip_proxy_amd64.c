@@ -28,6 +28,7 @@
 #include <linux/ip.h>
 #include <linux/icmp.h>
 #include <fcntl.h>
+#include <pthread.h>
 
 #define IP_CMD_DEFINE
 #include "ip_proxy_amd64.h"
@@ -248,8 +249,9 @@ static ssize_t tun_recv_packet(int tun, char *buf, size_t buflen) {
 	return nread;
 }
 
-static ssize_t sock_recv_packet(int sock, char *buf, size_t buflen) {
-	ssize_t nread = recv(sock, buf, buflen, MSG_DONTWAIT);
+static ssize_t
+sock_recv_packet(int sock, char *buf, size_t buflen) {
+	ssize_t nread = recv(sock, buf, buflen, 0);
 
 	if( nread < sizeof(struct iphdr) ) {
 		if( nread < 0 ) {
@@ -297,10 +299,10 @@ _retry:
 
 inline static int decrement_ttl(struct iphdr *iph) {
 	if( --(iph->ttl) == 0 ) {
-		char saddr[32], daddr[32];
-		log_error("Discarding IP fragment %s -> %s due to zero TTL\n",
-				inaddr_str(iph->saddr, saddr, sizeof(saddr)),
-				inaddr_str(iph->daddr, daddr, sizeof(daddr)));
+//		char saddr[32], daddr[32];
+//		log_error("Discarding IP fragment %s -> %s due to zero TTL\n",
+//				inaddr_str(iph->saddr, saddr, sizeof(saddr)),
+//				inaddr_str(iph->daddr, daddr, sizeof(daddr)));
 		return 0;
 	}
 
@@ -352,6 +354,16 @@ size_t MTU;
 size_t Overhead;
 const uint8_t option_type = 40;
 
+struct proxy {
+	int tun;
+	int tcp_sock;
+	int udp_sock;
+	int icmp_sock;
+	int icmp_recv;
+	int ctl;
+	char *buf;
+};
+
 // ip option header
 struct opthdr {
 	uint8_t type;
@@ -365,19 +377,32 @@ struct optdata {
 
 #define iphdrlen sizeof(struct iphdr)
 #define opthdrlen sizeof(struct opthdr)
-#define optdatelen sizeof(struct optdata)
 
-static int mangle_egress(char *buf, struct sockaddr_in *next_hop, ssize_t pktlen) {
+void printc(const char *fmt, char* p, ssize_t pktlen) {
+	log_error(fmt);
+	for (ssize_t i = 0; i < pktlen; i++) {
+		log_error("%02hhx ", *p);
+		p++;
+	}
+	log_error("\n");
+}
+
+#define LOG(format, ...) ({\
+	printf(format, ##__VA_ARGS__);\
+	printf("\n");\
+})
+
+static ssize_t mangle_egress(char *buf, struct sockaddr_in *next_hop, ssize_t pktlen) {
 	char *head = buf + Overhead;
 	char* ptr = buf;
-	for (; ptr < head; ptr++) {
+	for (; head < buf + Overhead + iphdrlen; ptr++, head++) {
 		*ptr = *head;
 	}
+	struct iphdr *iph = (struct iphdr *)buf;
 	struct opthdr *opthdr = (struct opthdr*)ptr;
 	opthdr->type = option_type;
-	opthdr->len = 10;
+	opthdr->len = (uint8_t)Overhead;
 
-	struct iphdr *iph = (struct iphdr *)head;
 	struct optdata *data = (struct optdata*)(ptr+opthdrlen);
 	data->src = iph->saddr;
 	data->dst = iph->daddr;
@@ -385,10 +410,13 @@ static int mangle_egress(char *buf, struct sockaddr_in *next_hop, ssize_t pktlen
 	iph->daddr = next_hop->sin_addr.s_addr;
 
 	// fix length
-	iph->ihl += (opthdrlen + optdatelen)/32;
-	iph->tot_len += (opthdrlen + optdatelen)/32;
+	pktlen += Overhead;
+	iph->ihl += Overhead/4;
+	iph->tot_len = htons(pktlen);
 	// leave checksum to kernel
-	return pktlen+opthdrlen+optdatelen;
+	iph->check = 0;
+//	iph->check = cksum((aliasing_uint32_t*) &iph, (iphdrlen + Overhead) / sizeof(aliasing_uint32_t));
+	return pktlen;
 }
 
 static int read_egress(int tun, int tcp_sock, int udp_sock, int icmp_sock, char *buf) {
@@ -410,12 +438,12 @@ static int read_egress(int tun, int tcp_sock, int udp_sock, int icmp_sock, char 
 		goto _active;
 	}
 
-	if( !decrement_ttl(iph) ) {
+//	if( !decrement_ttl(iph) ) {
 		/* TTL went to 0, discard.
 		 * TODO: send back ICMP Time Exceeded
 		 */
-		goto _active;
-	}
+//		goto _active;
+//	}
 
 	int sock;
 	switch(iph->protocol) {
@@ -432,136 +460,142 @@ static int read_egress(int tun, int tcp_sock, int udp_sock, int icmp_sock, char 
 			log_error("Unable to handle proto: %d\n", iph->protocol);
 			goto _active;
 	}
+//	printc("egress unencode:", head, pktlen);
 	pktlen = mangle_egress(buf, next_hop, pktlen);
+//	printc("egress  encoded:", buf, pktlen);
 	sock_send_packet(sock, buf, pktlen, next_hop);
-	_active:
+_active:
 	return 1;
 }
 
 static void mangle_ingress(char *buf) {
 	struct iphdr *iph = (struct iphdr *)buf;
-	if (iph->ihl == 5) {
-		// no ip options
-		//TODO should we send the packet to tun?
-		return;
-	}
-	struct opthdr *opthdr = (struct opthdr*)(buf+iphdrlen);
-	if (opthdr->type != option_type) {
-		return;
-	}
 	struct optdata *data = (struct optdata*)(buf+iphdrlen+opthdrlen);
 	iph->saddr = data->src;
 	iph->daddr = data->dst;
 }
 
-static int read_ingress(int sock, int tun, char *buf) {
-	struct iphdr *iph;
-
+static int read_ingress(int sock, char *buf) {
 	ssize_t pktlen = sock_recv_packet(sock, buf, MTU);
 	if( pktlen < 0 )
 		return 0;
 
-	iph = (struct iphdr *)buf;
-
-	if( !decrement_ttl(iph) ) {
-		/* TTL went to 0, discard.
-		 * TODO: send back ICMP Time Exceeded
-		 */
+	struct iphdr *iph = (struct iphdr *)buf;
+//	if( !decrement_ttl(iph) ) {
+//		/* TTL went to 0, discard.
+//		 * TODO: send back ICMP Time Exceeded
+//		 */
+//		goto _active;
+//	}
+	if (iph->ihl == 5) {
+		// no ip options
+		goto _active;
+	}
+	struct opthdr *opthdr = (struct opthdr*)(buf+iphdrlen);
+	if (opthdr->type != option_type) {
 		goto _active;
 	}
 	mangle_ingress(buf);
-	tun_send_packet(tun, buf, pktlen);
-	_active:
+//	printc("ingress encoded: ", buf, pktlen);
+	struct sockaddr_in sa = {
+		.sin_family = AF_INET,
+		.sin_addr.s_addr = (in_addr_t)iph->daddr,
+	};
+//	printc("ingress decoded: ", buf, pktlen);
+	sock_send_packet(sock, buf, pktlen, &sa);
+_active:
 	return 1;
 }
 
-enum PFD {
-	PFD_TUN = 0,
-	PFD_TCP_SOCK,
-	PFD_UDP_SOCK,
-	PFD_ICMP_SOCK,
-	PFD_CTL,
-	PFD_CNT
+void *_process_cmd(void * ptr) {
+	struct proxy *p = (struct proxy *) ptr;
+	while(1) {
+		if (exit_flag) {
+			return 0;
+		}
+		process_cmd(p->ctl);
+	}
+}
+
+void *_read_egress(void *ptr) {
+	struct proxy *p = (struct proxy *) ptr;
+	while(1) {
+		if (exit_flag) {
+			return 0;
+		}
+		read_egress(p->tun, p->tcp_sock, p->udp_sock, p->icmp_sock, p->buf);
+	}
+}
+
+struct ingress_args {
+	struct proxy *p;
+	int proto;
 };
 
-void run_ip_proxy(int tun, int tcp_sock, int udp_sock, int icmp_sock, int ctl,
-			   in_addr_t tun_ip, in_addr_t local_ip, size_t mtu, size_t overhead, int log_errors) {
-	char *buf;
-	struct pollfd fds[PFD_CNT] = {
-		{
-			.fd = tun,
-			.events = POLLIN
-		},
-		{
-			.fd = tcp_sock,
-			.events = POLLIN
-		},
-		{
-			.fd = udp_sock,
-			.events = POLLIN
-		},
-		{
-			.fd = icmp_sock,
-			.events = POLLIN
-		},
-		{
-			.fd = ctl,
-			.events = POLLIN
-		},
-	};
+void *_read_ingress(void *ptr) {
+	struct ingress_args *p = (struct ingress_args *) ptr;
+	int rcv;
+	switch (p->proto) {
+		case IPPROTO_TCP:
+			rcv = p->p->tcp_sock;
+			break;
+		case IPPROTO_UDP:
+			rcv = p->p->udp_sock;
+			break;
+		case IPPROTO_ICMP:
+			rcv = p->p->icmp_recv;
+			break;
+	}
+	while(1) {
+		if (exit_flag) {
+			return 0;
+		}
+		read_ingress(rcv, p->p->buf);
+	}
+}
 
+void run_ip_proxy(int tun, int tcp_sock, int udp_sock, int icmp_sock, int icmp_recv, int ctl,
+				  in_addr_t tun_ip, in_addr_t local_ip, size_t mtu, size_t overhead, int log_errors) {
 	exit_flag = 0;
 	tun_addr = tun_ip;
 	local_addr = local_ip;
 	MTU = mtu;
 	Overhead = overhead;
 	log_enabled = log_errors;
-
-	buf = (char *) malloc(mtu);
-	if( !buf ) {
+	struct proxy p = {.ctl = ctl, .tun = tun, .tcp_sock = tcp_sock, .udp_sock = udp_sock, .icmp_sock = icmp_sock, .icmp_recv = icmp_recv, .buf = (char *) malloc(mtu)};
+	if( !p.buf ) {
 		log_error("Failed to allocate %d byte buffer\n", mtu);
 		exit(1);
 	}
+	LOG("tcp %d udp %d icmp %d, ctl %d", p.tcp_sock, p.udp_sock, p.icmp_sock, ctl);
 
-	fcntl(tun, F_SETFL, O_NONBLOCK);
-
-	while( !exit_flag ) {
-		int nfds = poll(fds, PFD_CNT, -1), activity;
-		if( nfds < 0 ) {
-			if( errno == EINTR )
-				continue;
-
-			log_error("Poll failed: %s\n", strerror(errno));
-			exit(1);
-		}
-
-		if( fds[PFD_CTL].revents & POLLIN )
-			process_cmd(ctl);
-
-		if( fds[PFD_TUN].revents & POLLIN)
-			do {
-				activity = 0;
-				activity += read_egress(tun, tcp_sock, udp_sock, icmp_sock, buf);
-			} while( activity );
-
-		if( fds[PFD_TCP_SOCK].revents & POLLIN)
-			do {
-				activity = 0;
-				activity += read_ingress(tun, tcp_sock, buf);
-			} while( activity );
-
-		if( fds[PFD_UDP_SOCK].revents & POLLIN)
-			do {
-				activity = 0;
-				activity += read_ingress(tun, udp_sock, buf);
-			} while( activity );
-
-		if( fds[PFD_ICMP_SOCK].revents & POLLIN)
-			do {
-				activity = 0;
-				activity += read_ingress(tun, icmp_sock, buf);
-			} while( activity );
+	pthread_t *threads = malloc(sizeof(pthread_t)*5);
+	if(pthread_create( &threads[0], NULL, &_process_cmd, &p)) {
+		fprintf(stderr,"Error - pthread_create() failed\n");
+		exit(EXIT_FAILURE);
+	}
+	if(pthread_create( &threads[1], NULL, &_read_egress, &p)) {
+		fprintf(stderr,"Error - pthread_create() failed\n");
+		exit(EXIT_FAILURE);
+	}
+	struct ingress_args args1 = {.p = &p, .proto = IPPROTO_TCP};
+	struct ingress_args args2 = {.p = &p, .proto = IPPROTO_UDP};
+	struct ingress_args args3 = {.p = &p, .proto = IPPROTO_ICMP};
+	if(pthread_create( &threads[2], NULL, &_read_ingress, &args1)) {
+		fprintf(stderr,"Error - pthread_create() failed\n");
+		exit(EXIT_FAILURE);
+	}
+	if(pthread_create( &threads[3], NULL, &_read_ingress, &args2)) {
+		fprintf(stderr,"Error - pthread_create() failed\n");
+		exit(EXIT_FAILURE);
+	}
+	if(pthread_create( &threads[4], NULL, &_read_ingress, &args3)) {
+		fprintf(stderr,"Error - pthread_create() failed\n");
+		exit(EXIT_FAILURE);
 	}
 
-	free(buf);
+	for (int i = 0; i < 5; i++) {
+		pthread_join(threads[i], NULL);
+	}
+	free(p.buf);
 }

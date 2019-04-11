@@ -29,17 +29,17 @@ import (
 	"github.com/coreos/flannel/pkg/ip"
 )
 
-func runCProxy(tun *os.File, tcpSock, udpSock, icmpSock int, ctl *os.File, tunIP, localIP ip.IP4, mtu, overhead int) {
+func runCProxy(tun *os.File, tcpSock, udpSock, icmpSock, icmpRecv int, ctl *os.File, tunIP, localIP ip.IP4, mtu, overhead int) {
 	var log_errors int
 	if log.V(1) {
 		log_errors = 1
 	}
-
 	C.run_ip_proxy(
 		C.int(tun.Fd()),
 		C.int(tcpSock),
 		C.int(udpSock),
 		C.int(icmpSock),
+		C.int(icmpRecv),
 		C.int(ctl.Fd()),
 		C.in_addr_t(tunIP.NetworkOrder()),
 		C.in_addr_t(localIP.NetworkOrder()),

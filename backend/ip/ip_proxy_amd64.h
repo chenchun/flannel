@@ -29,6 +29,6 @@ ipcmdexport int IP_CMD_SET_ROUTE = 1;
 ipcmdexport int IP_CMD_DEL_ROUTE = 2;
 ipcmdexport int IP_CMD_STOP      = 3;
 
-void run_ip_proxy(int tun, int tcp_sock, int udp_sock, int icmp_sock, int ctl, in_addr_t tun_ip, in_addr_t local_ip, size_t mtu, size_t overhead, int log_errors);
+void run_ip_proxy(int tun, int tcp_sock, int udp_sock, int icmp_sock, int icmp_recv, int ctl, in_addr_t tun_ip, in_addr_t local_ip, size_t mtu, size_t overhead, int log_errors);
 
 #endif
