@@ -29,7 +29,7 @@
 #include <linux/icmp.h>
 #include <fcntl.h>
 
-#define CMD_DEFINE
+#define IP_CMD_DEFINE
 #include "ip_proxy_amd64.h"
 
 struct ip_net {
@@ -58,6 +58,7 @@ size_t routes_alloc;
 size_t routes_cnt;
 
 in_addr_t tun_addr;
+in_addr_t local_addr;
 
 int log_enabled;
 int exit_flag;
@@ -326,7 +327,7 @@ static void process_cmd(int ctl) {
 		return;
 	}
 
-	if( cmd.cmd == CMD_SET_ROUTE ) {
+	if( cmd.cmd == IP_CMD_SET_ROUTE ) {
 		ipn.mask = netmask(cmd.dest_net_len);
 		ipn.ip = cmd.dest_net & ipn.mask;
 
@@ -335,29 +336,69 @@ static void process_cmd(int ctl) {
 
 		set_route(ipn, &sa);
 
-	} else if( cmd.cmd == CMD_DEL_ROUTE ) {
+	} else if( cmd.cmd == IP_CMD_DEL_ROUTE ) {
 		ipn.mask = netmask(cmd.dest_net_len);
 		ipn.ip = cmd.dest_net & ipn.mask;
 
 		del_route(ipn);
 
-	} else if( cmd.cmd == CMD_STOP ) {
+	} else if( cmd.cmd == IP_CMD_STOP ) {
 		exit_flag = 1;
 	}
 }
 
 
-static void mangle_egress(char *buf, size_t overhead) {
-	char *head = buf + overhead;
+size_t MTU;
+size_t Overhead;
+const uint8_t option_type = 40;
 
+// ip option header
+struct opthdr {
+	uint8_t type;
+	uint8_t len;
+};
+
+struct optdata {
+	__be32 src;
+	__be32 dst;
+};
+
+#define iphdrlen sizeof(struct iphdr)
+#define opthdrlen sizeof(struct opthdr)
+#define optdatelen sizeof(struct optdata)
+
+static int mangle_egress(char *buf, struct sockaddr_in *next_hop, ssize_t pktlen) {
+	char *head = buf + Overhead;
+	char* ptr = buf;
+	for (; ptr < head; ptr++) {
+		*ptr = *head;
+	}
+	struct opthdr *opthdr = (struct opthdr*)ptr;
+	opthdr->type = option_type;
+	opthdr->len = 10;
+
+	struct iphdr *iph = (struct iphdr *)head;
+	struct optdata *data = (struct optdata*)(ptr+opthdrlen);
+	data->src = iph->saddr;
+	data->dst = iph->daddr;
+	iph->saddr = local_addr;
+	iph->daddr = next_hop->sin_addr.s_addr;
+
+	// fix length
+	iph->ihl += (opthdrlen + optdatelen)/32;
+	iph->tot_len += (opthdrlen + optdatelen)/32;
+	// leave checksum to kernel
+	return pktlen+opthdrlen+optdatelen;
 }
 
-static int read_egress(int tun, int tcp_sock, int udp_sock, int icmp_sock, char *buf, size_t buflen, size_t overhead) {
+static int read_egress(int tun, int tcp_sock, int udp_sock, int icmp_sock, char *buf) {
 	struct iphdr *iph;
 	struct sockaddr_in *next_hop;
 
-	char *head = buf + overhead;
-	ssize_t pktlen = tun_recv_packet(tun, head, buflen-overhead);
+	// read packets starting at the `Overhead` position, so when adding IP options, we only need to move
+	// IP Header instead of payload ahead which is more efficiency for packets larger than 40 bytes.
+	char *head = buf + Overhead;
+	ssize_t pktlen = tun_recv_packet(tun, head, MTU - Overhead);
 	if( pktlen < 0 )
 		return 0;
 
@@ -391,20 +432,32 @@ static int read_egress(int tun, int tcp_sock, int udp_sock, int icmp_sock, char 
 			log_error("Unable to handle proto: %d\n", iph->protocol);
 			goto _active;
 	}
-	mangle_egress(buf, overhead);
+	pktlen = mangle_egress(buf, next_hop, pktlen);
 	sock_send_packet(sock, buf, pktlen, next_hop);
 	_active:
 	return 1;
 }
 
-static void mangle_ingress(char *buf, ssize_t pktlen) {
-
+static void mangle_ingress(char *buf) {
+	struct iphdr *iph = (struct iphdr *)buf;
+	if (iph->ihl == 5) {
+		// no ip options
+		//TODO should we send the packet to tun?
+		return;
+	}
+	struct opthdr *opthdr = (struct opthdr*)(buf+iphdrlen);
+	if (opthdr->type != option_type) {
+		return;
+	}
+	struct optdata *data = (struct optdata*)(buf+iphdrlen+opthdrlen);
+	iph->saddr = data->src;
+	iph->daddr = data->dst;
 }
 
-static int read_ingress(int sock, int tun, char *buf, size_t buflen, size_t overhead) {
+static int read_ingress(int sock, int tun, char *buf) {
 	struct iphdr *iph;
 
-	ssize_t pktlen = sock_recv_packet(sock, buf, buflen);
+	ssize_t pktlen = sock_recv_packet(sock, buf, MTU);
 	if( pktlen < 0 )
 		return 0;
 
@@ -416,7 +469,7 @@ static int read_ingress(int sock, int tun, char *buf, size_t buflen, size_t over
 		 */
 		goto _active;
 	}
-	mangle_ingress(buf, pktlen);
+	mangle_ingress(buf);
 	tun_send_packet(tun, buf, pktlen);
 	_active:
 	return 1;
@@ -431,8 +484,8 @@ enum PFD {
 	PFD_CNT
 };
 
-void run_ip_proxy(int tun, int sock, int tcp_sock, int udp_sock, int icmp_sock, int ctl,
-			   in_addr_t tun_ip, size_t mtu, size_t overhead, int log_errors) {
+void run_ip_proxy(int tun, int tcp_sock, int udp_sock, int icmp_sock, int ctl,
+			   in_addr_t tun_ip, in_addr_t local_ip, size_t mtu, size_t overhead, int log_errors) {
 	char *buf;
 	struct pollfd fds[PFD_CNT] = {
 		{
@@ -459,6 +512,9 @@ void run_ip_proxy(int tun, int sock, int tcp_sock, int udp_sock, int icmp_sock, 
 
 	exit_flag = 0;
 	tun_addr = tun_ip;
+	local_addr = local_ip;
+	MTU = mtu;
+	Overhead = overhead;
 	log_enabled = log_errors;
 
 	buf = (char *) malloc(mtu);
@@ -485,25 +541,25 @@ void run_ip_proxy(int tun, int sock, int tcp_sock, int udp_sock, int icmp_sock, 
 		if( fds[PFD_TUN].revents & POLLIN)
 			do {
 				activity = 0;
-				activity += read_egress(tun, tcp_sock, udp_sock, icmp_sock, buf, mtu, overhead);
+				activity += read_egress(tun, tcp_sock, udp_sock, icmp_sock, buf);
 			} while( activity );
 
 		if( fds[PFD_TCP_SOCK].revents & POLLIN)
 			do {
 				activity = 0;
-				activity += read_ingress(tun, tcp_sock, buf, mtu, overhead);
+				activity += read_ingress(tun, tcp_sock, buf);
 			} while( activity );
 
 		if( fds[PFD_UDP_SOCK].revents & POLLIN)
 			do {
 				activity = 0;
-				activity += read_ingress(tun, udp_sock, buf, mtu, overhead);
+				activity += read_ingress(tun, udp_sock, buf);
 			} while( activity );
 
 		if( fds[PFD_ICMP_SOCK].revents & POLLIN)
 			do {
 				activity = 0;
-				activity += read_ingress(tun, icmp_sock, buf, mtu, overhead);
+				activity += read_ingress(tun, icmp_sock, buf);
 			} while( activity );
 	}
 

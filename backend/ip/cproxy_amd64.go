@@ -15,11 +15,11 @@
 
 package ip
 
+//#cgo CFLAGS: -I ../udp/
 //#include "ip_proxy_amd64.h"
 import "C"
 
 import (
-	"net"
 	"os"
 	"reflect"
 	"unsafe"
@@ -29,27 +29,20 @@ import (
 	"github.com/coreos/flannel/pkg/ip"
 )
 
-func runCProxy(tun *os.File, conn *net.UDPConn, tcpSock, udpSock, icmpSock int, ctl *os.File, tunIP ip.IP4, mtu, overhead int) {
+func runCProxy(tun *os.File, tcpSock, udpSock, icmpSock int, ctl *os.File, tunIP, localIP ip.IP4, mtu, overhead int) {
 	var log_errors int
 	if log.V(1) {
 		log_errors = 1
 	}
 
-	c, err := conn.File()
-	if err != nil {
-		log.Error("Converting UDPConn to File failed: ", err)
-		return
-	}
-	defer c.Close()
-
 	C.run_ip_proxy(
 		C.int(tun.Fd()),
-		C.int(c.Fd()),
 		C.int(tcpSock),
 		C.int(udpSock),
 		C.int(icmpSock),
 		C.int(ctl.Fd()),
 		C.in_addr_t(tunIP.NetworkOrder()),
+		C.in_addr_t(localIP.NetworkOrder()),
 		C.size_t(mtu),
 		C.size_t(overhead),
 		C.int(log_errors),
@@ -69,7 +62,7 @@ func writeCommand(f *os.File, cmd *C.command) {
 
 func setRoute(ctl *os.File, dst ip.IP4Net, nextHopIP ip.IP4, nextHopPort int) {
 	cmd := C.command{
-		cmd:           C.CMD_SET_ROUTE,
+		cmd:           C.IP_CMD_SET_ROUTE,
 		dest_net:      C.in_addr_t(dst.IP.NetworkOrder()),
 		dest_net_len:  C.int(dst.PrefixLen),
 		next_hop_ip:   C.in_addr_t(nextHopIP.NetworkOrder()),
@@ -81,7 +74,7 @@ func setRoute(ctl *os.File, dst ip.IP4Net, nextHopIP ip.IP4, nextHopPort int) {
 
 func removeRoute(ctl *os.File, dst ip.IP4Net) {
 	cmd := C.command{
-		cmd:          C.CMD_DEL_ROUTE,
+		cmd:          C.IP_CMD_DEL_ROUTE,
 		dest_net:     C.in_addr_t(dst.IP.NetworkOrder()),
 		dest_net_len: C.int(dst.PrefixLen),
 	}
@@ -91,7 +84,7 @@ func removeRoute(ctl *os.File, dst ip.IP4Net) {
 
 func stopProxy(ctl *os.File) {
 	cmd := C.command{
-		cmd: C.CMD_STOP,
+		cmd: C.IP_CMD_STOP,
 	}
 
 	writeCommand(ctl, &cmd)

@@ -19,7 +19,6 @@ package ip
 
 import (
 	"fmt"
-	"net"
 	"os"
 	"sync"
 	"syscall"
@@ -31,7 +30,6 @@ import (
 	"github.com/coreos/flannel/backend"
 	"github.com/coreos/flannel/pkg/ip"
 	"github.com/coreos/flannel/subnet"
-	"github.com/google/gopacket/layers"
 )
 
 const (
@@ -45,10 +43,10 @@ type network struct {
 	ctl    *os.File
 	ctl2   *os.File
 	tun    *os.File
-	conn   *net.UDPConn
-	tcpSocket, udpSocket, icmpSocket int
 	tunNet ip.IP4Net
 	sm     subnet.Manager
+
+	tcpSocket, udpSocket, icmpSocket int
 }
 
 func newNetwork(sm subnet.Manager, extIface *backend.ExternalInterface, port int, nw ip.IP4Net, l *subnet.Lease) (*network, error) {
@@ -68,14 +66,13 @@ func newNetwork(sm subnet.Manager, extIface *backend.ExternalInterface, port int
 	}
 
 	var err error
-	n.conn, err = net.ListenUDP("udp4", &net.UDPAddr{IP: extIface.IfaceAddr, Port: port})
-	if err != nil {
-		return nil, fmt.Errorf("failed to start listening on UDP socket: %v", err)
-	}
-
 	n.ctl, n.ctl2, err = newCtlSockets()
 	if err != nil {
 		return nil, fmt.Errorf("failed to create control socket: %v", err)
+	}
+
+	if err = n.initSocket(); err != nil {
+		return nil, fmt.Errorf("failed to create tcp/udp/icmp socket: %v", err)
 	}
 
 	return n, nil
@@ -84,7 +81,6 @@ func newNetwork(sm subnet.Manager, extIface *backend.ExternalInterface, port int
 func (n *network) Run(ctx context.Context) {
 	defer func() {
 		n.tun.Close()
-		n.conn.Close()
 		n.ctl.Close()
 		n.ctl2.Close()
 		syscall.Close(n.tcpSocket)
@@ -98,7 +94,7 @@ func (n *network) Run(ctx context.Context) {
 
 	wg.Add(1)
 	go func() {
-		runCProxy(n.tun, n.conn, n.tcpSocket, n.udpSocket, n.icmpSocket, n.ctl2, n.tunNet.IP, n.ExtIface.Iface.MTU, encapOverhead)
+		runCProxy(n.tun, n.tcpSocket, n.udpSocket, n.icmpSocket, n.ctl2, n.tunNet.IP, n.SubnetLease.Attrs.PublicIP, n.ExtIface.Iface.MTU, encapOverhead)
 		wg.Done()
 	}()
 
@@ -212,7 +208,6 @@ func (n *network) processSubnetEvents(batch []subnet.Event) {
 	}
 }
 
-
 func (n *network) initSocket() (err error) {
 	for proto, socketPtr := range map[int]*int{
 		syscall.IPPROTO_TCP: &n.tcpSocket,
@@ -228,19 +223,4 @@ func (n *network) initSocket() (err error) {
 		}
 	}
 	return
-}
-
-func (n *network) send(data []byte, addr *syscall.SockaddrInet4, proto layers.IPProtocol) error {
-	var socket int
-	switch proto {
-	case layers.IPProtocolTCP:
-		socket = n.tcpSocket
-	case layers.IPProtocolUDP:
-		socket = n.udpSocket
-	case layers.IPProtocolICMPv4:
-		socket = n.icmpSocket
-	default:
-		return fmt.Errorf("unknow packet protocol %v", proto)
-	}
-	return syscall.Sendto(socket, data, 0, addr)
 }
