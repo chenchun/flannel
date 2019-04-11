@@ -58,6 +58,7 @@ import (
 	_ "github.com/coreos/flannel/backend/ipsec"
 	_ "github.com/coreos/flannel/backend/udp"
 	_ "github.com/coreos/flannel/backend/vxlan"
+	_ "github.com/coreos/flannel/backend/ip"
 	"github.com/coreos/go-systemd/daemon"
 )
 
