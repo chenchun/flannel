@@ -39,7 +39,6 @@ const (
 type network struct {
 	backend.SimpleNetwork
 	name   string
-	port   int
 	ctl    *os.File
 	ctl2   *os.File
 	tun    *os.File
@@ -50,13 +49,12 @@ type network struct {
 	icmpRecv int
 }
 
-func newNetwork(sm subnet.Manager, extIface *backend.ExternalInterface, port int, nw ip.IP4Net, l *subnet.Lease) (*network, error) {
+func newNetwork(sm subnet.Manager, extIface *backend.ExternalInterface, nw ip.IP4Net, l *subnet.Lease) (*network, error) {
 	n := &network{
 		SimpleNetwork: backend.SimpleNetwork{
 			SubnetLease: l,
 			ExtIface:    extIface,
 		},
-		port: port,
 		sm:   sm,
 	}
 
@@ -197,7 +195,7 @@ func (n *network) processSubnetEvents(batch []subnet.Event) {
 		case subnet.EventAdded:
 			log.Info("Subnet added: ", evt.Lease.Subnet)
 
-			setRoute(n.ctl, evt.Lease.Subnet, evt.Lease.Attrs.PublicIP, n.port)
+			setRoute(n.ctl, evt.Lease.Subnet, evt.Lease.Attrs.PublicIP)
 
 		case subnet.EventRemoved:
 			log.Info("Subnet removed: ", evt.Lease.Subnet)

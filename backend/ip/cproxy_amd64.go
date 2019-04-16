@@ -60,13 +60,12 @@ func writeCommand(f *os.File, cmd *C.command) {
 	f.Write(buf)
 }
 
-func setRoute(ctl *os.File, dst ip.IP4Net, nextHopIP ip.IP4, nextHopPort int) {
+func setRoute(ctl *os.File, dst ip.IP4Net, nextHopIP ip.IP4) {
 	cmd := C.command{
 		cmd:           C.IP_CMD_SET_ROUTE,
 		dest_net:      C.in_addr_t(dst.IP.NetworkOrder()),
 		dest_net_len:  C.int(dst.PrefixLen),
 		next_hop_ip:   C.in_addr_t(nextHopIP.NetworkOrder()),
-		next_hop_port: C.short(nextHopPort),
 	}
 
 	writeCommand(ctl, &cmd)

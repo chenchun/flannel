@@ -271,11 +271,11 @@ static void sock_send_packet(int sock, char *pkt, size_t pktlen, struct sockaddr
 
 	if( nsent != pktlen ) {
 		if( nsent < 0 ) {
-			log_error("send to %s:%hu failed: %s\n",
-					inet_ntoa(dst->sin_addr), ntohs(dst->sin_port), strerror(errno));
+			log_error("send to %s failed: %s\n",
+					inet_ntoa(dst->sin_addr), strerror(errno));
 		} else {
-			log_error("Was only able to send %d out of %d bytes to %s:%hu\n",
-					(int)nsent, (int)pktlen, inet_ntoa(dst->sin_addr), ntohs(dst->sin_port));
+			log_error("Was only able to send %d out of %d bytes to %s\n",
+					(int)nsent, (int)pktlen, inet_ntoa(dst->sin_addr));
 		}
 	}
 }
@@ -334,8 +334,6 @@ static void process_cmd(int ctl) {
 		ipn.ip = cmd.dest_net & ipn.mask;
 
 		sa.sin_addr.s_addr = cmd.next_hop_ip;
-		sa.sin_port = htons(cmd.next_hop_port);
-
 		set_route(ipn, &sa);
 
 	} else if( cmd.cmd == IP_CMD_DEL_ROUTE ) {
@@ -438,13 +436,6 @@ static int read_egress(int tun, int tcp_sock, int udp_sock, int icmp_sock, char 
 		goto _active;
 	}
 
-//	if( !decrement_ttl(iph) ) {
-		/* TTL went to 0, discard.
-		 * TODO: send back ICMP Time Exceeded
-		 */
-//		goto _active;
-//	}
-
 	int sock;
 	switch(iph->protocol) {
 		case IPPROTO_TCP:
@@ -481,12 +472,6 @@ static int read_ingress(int sock, char *buf) {
 		return 0;
 
 	struct iphdr *iph = (struct iphdr *)buf;
-//	if( !decrement_ttl(iph) ) {
-//		/* TTL went to 0, discard.
-//		 * TODO: send back ICMP Time Exceeded
-//		 */
-//		goto _active;
-//	}
 	if (iph->ihl == 5) {
 		// no ip options
 		goto _active;

@@ -16,7 +16,6 @@
 package ip
 
 import (
-	"encoding/json"
 	"fmt"
 	"sync"
 
@@ -49,19 +48,6 @@ func New(sm subnet.Manager, extIface *backend.ExternalInterface) (backend.Backen
 }
 
 func (be *UdpBackend) RegisterNetwork(ctx context.Context, wg sync.WaitGroup, config *subnet.Config) (backend.Network, error) {
-	cfg := struct {
-		Port int
-	}{
-		Port: defaultPort,
-	}
-
-	// Parse our configuration
-	if len(config.Backend) > 0 {
-		if err := json.Unmarshal(config.Backend, &cfg); err != nil {
-			return nil, fmt.Errorf("error decoding UDP backend config: %v", err)
-		}
-	}
-
 	// Acquire the lease form subnet manager
 	attrs := subnet.LeaseAttrs{
 		PublicIP: ip.FromIP(be.extIface.ExtAddr),
@@ -85,5 +71,5 @@ func (be *UdpBackend) RegisterNetwork(ctx context.Context, wg sync.WaitGroup, co
 		PrefixLen: config.Network.PrefixLen,
 	}
 
-	return newNetwork(be.sm, be.extIface, cfg.Port, tunNet, l)
+	return newNetwork(be.sm, be.extIface, tunNet, l)
 }
