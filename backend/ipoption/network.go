@@ -7,7 +7,6 @@ import (
 	"syscall"
 
 	"github.com/coreos/flannel/backend"
-	"github.com/coreos/flannel/backend/ipoption/option"
 	"github.com/coreos/flannel/pkg/ip"
 	"github.com/coreos/flannel/subnet"
 	log "github.com/golang/glog"
@@ -17,12 +16,13 @@ import (
 type network struct {
 	backend.SimpleNetwork
 	SM         subnet.Manager
-	subnetsMap *sync.Map
+	subnetsMap *sync.Map // subnet ip as key
+	publicIPMap *sync.Map // public ip as key
+
 
 	subnetMask  net.IPMask
 	subnetIPNet *net.IPNet
 	publicIP    net.IP
-	opt         *option.Option
 	Network     *net.IPNet
 	TunFd       *os.File
 	tempIP      []byte
@@ -41,10 +41,11 @@ func newNetwork(subnetLease *subnet.Lease, extIface *backend.ExternalInterface, 
 		subnetMask:  subnetLease.Subnet.ToIPNet().Mask,
 		subnetIPNet: subnetLease.Subnet.ToIPNet(),
 		subnetsMap:  &sync.Map{},
+		publicIPMap: &sync.Map{},
 		Network:     n.ToIPNet(),
 		tempIP:      make([]byte, 4),
 	}
-	net.opt = option.New(n.ToIPNet())
+	copy(net.tempIP, subnetLease.Subnet.IP.ToIP().To4())
 	return net
 }
 
@@ -106,10 +107,12 @@ func (n *network) addLease(lease *subnet.Lease) {
 	obj := cachedObj{dstIP: lease.Attrs.PublicIP.ToIP().To4()}
 	obj.dstAddr = &syscall.SockaddrInet4{Addr: [4]byte{obj.dstIP[0], obj.dstIP[1], obj.dstIP[2], obj.dstIP[3]}}
 	n.subnetsMap.Store(lease.Subnet.IP, &obj)
+	n.publicIPMap.Store(lease.Attrs.PublicIP, lease.Subnet.IP.ToIP().To4())
 }
 
 func (n *network) delLease(lease *subnet.Lease) {
 	n.subnetsMap.Delete(lease.Subnet.IP)
+	n.publicIPMap.Delete(lease.Attrs.PublicIP)
 }
 
 func (n *network) getDstNode(subnetIP net.IP) *cachedObj {
@@ -123,8 +126,19 @@ func (n *network) getDstNode(subnetIP net.IP) *cachedObj {
 	return nil
 }
 
+func (n *network) getDstSubnet(publicIP net.IP) net.IP {
+	if publicIP == nil {
+		return nil
+	}
+	l, ok := n.publicIPMap.Load(ip.FromIP(publicIP))
+	if ok {
+		return l.(net.IP)
+	}
+	return nil
+}
+
 func (n *network) MTU() int {
-	return n.ExtIface.Iface.MTU - int(n.opt.OptLen())
+	return n.ExtIface.Iface.MTU - 4
 }
 
 func (n *network) handleSubnetEvents(batch []subnet.Event) {

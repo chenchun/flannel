@@ -48,9 +48,9 @@ func (n *network) mangleEgress(buf []byte) error {
 	}
 	//glog.V(4).Infof("From src %s to dst %s", ipPacket.SrcIP.String(), ipPacket.DstIP.String())
 	// encoding original container ips
-	copy(n.tempIP, ipPacket.DstIP.To4())
-	opt := layers.IPv4Option{OptionType: option.IPOptionType, OptionData: n.opt.EncodeOptionData(ipPacket.SrcIP, n.tempIP)}
-	opt.OptionLength = n.opt.OptLen()
+
+	opt := layers.IPv4Option{OptionType: option.IPOptionType, OptionData: []byte{ipPacket.SrcIP.To4()[3], ipPacket.DstIP.To4()[3]}}
+	opt.OptionLength = 4
 	ipPacket.Options = append(ipPacket.Options, opt)
 	// change src and dst ip
 	ipPacket.SrcIP = n.publicIP
@@ -59,7 +59,7 @@ func (n *network) mangleEgress(buf []byte) error {
 		return fmt.Errorf("can't find routes to dst ip %s, subnet %s", ipPacket.DstIP.String(), ipPacket.DstIP.Mask(n.subnetMask))
 	}
 	ipPacket.DstIP = cached.dstIP
-	//glog.V(4).Infof("Changed as src %s to dst %s", ipPacket.SrcIP.String(), ipPacket.DstIP.String())
+	//glog.V(4).Infof("Changed as src %s to dst %s, options: %s", ipPacket.SrcIP.String(), ipPacket.DstIP.String(), hex.EncodeToString(ipPacket.Options[0].OptionData))
 	sBuf := gopacket.NewSerializeBuffer()
 	if err := gopacket.SerializeLayers(sBuf, gopacket.SerializeOptions{
 		//ComputeChecksums: true,
@@ -145,13 +145,21 @@ func (n *network) mangleIngress(buf []byte) error {
 		// TODO Did we steel the packet from kernel ? do we need to send it ?
 		return nil
 	}
-	if err := n.opt.DecodeOptionData(ipPacket.Options[0].OptionData); err != nil {
-		return err
-	}
-	//glog.V(4).Infof("From src ip %s to dst ip %s, options %v, decoded to %v", ipPacket.SrcIP.String(), ipPacket.DstIP.String(), ipPacket.Options, n.opt)
+	optData := ipPacket.Options[0].OptionData
+	//glog.V(4).Infof("From src ip %s to dst ip %s, options %v", ipPacket.SrcIP.String(), ipPacket.DstIP.String(), ipPacket.Options)
 	ipPacket.Options = nil
-	ipPacket.DstIP = n.opt.DstIP
-	ipPacket.SrcIP = n.opt.SrcIP
+	dstIP := n.tempIP
+	dstIP[3] = optData[1]
+	cachedSubnetIP := n.getDstSubnet(ipPacket.SrcIP)
+	if cachedSubnetIP == nil {
+		return fmt.Errorf("can't find routes to src ip %s", ipPacket.SrcIP.String())
+	}
+	srcIP := make([]byte, 4)
+	copy(srcIP, cachedSubnetIP)
+	srcIP[3] = optData[0]
+	ipPacket.DstIP = dstIP
+	ipPacket.SrcIP = srcIP
+	//glog.V(4).Infof("Decoded to src ip %s to dst ip %s", ipPacket.SrcIP.String(), ipPacket.DstIP.String())
 	sBuf := gopacket.NewSerializeBuffer()
 	if err := gopacket.SerializeLayers(sBuf, gopacket.SerializeOptions{
 		//ComputeChecksums: true,
