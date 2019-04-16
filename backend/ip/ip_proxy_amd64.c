@@ -223,6 +223,25 @@ static struct sockaddr_in *find_route(in_addr_t dst) {
 	return NULL;
 }
 
+static in_addr_t *find_subnet(in_addr_t public_ip) {
+	size_t i;
+
+	for( i = 0; i < routes_cnt; i++ ) {
+		if(routes[i].next_hop.sin_addr.s_addr == public_ip) {
+			// packets for same dest tend to come in bursts. swap to front make it faster for subsequent ones
+			if( i != 0 ) {
+				struct route_entry tmp = routes[i];
+				routes[i] = routes[0];
+				routes[0] = tmp;
+			}
+
+			return &routes[0].dst.ip;
+		}
+	}
+
+	return NULL;
+}
+
 static char *inaddr_str(in_addr_t a, char *buf, size_t len) {
 	struct in_addr addr;
 	addr.s_addr = a;
@@ -359,7 +378,6 @@ struct proxy {
 	int icmp_sock;
 	int icmp_recv;
 	int ctl;
-	char *buf;
 };
 
 // ip option header
@@ -369,8 +387,8 @@ struct opthdr {
 };
 
 struct optdata {
-	__be32 src;
-	__be32 dst;
+	char src;
+	char dst;
 };
 
 #define iphdrlen sizeof(struct iphdr)
@@ -379,6 +397,9 @@ struct optdata {
 void printc(const char *fmt, char* p, ssize_t pktlen) {
 	log_error(fmt);
 	for (ssize_t i = 0; i < pktlen; i++) {
+		if (i == 12 || i == 20) {
+			log_error("  ");
+		}
 		log_error("%02hhx ", *p);
 		p++;
 	}
@@ -402,8 +423,8 @@ static ssize_t mangle_egress(char *buf, struct sockaddr_in *next_hop, ssize_t pk
 	opthdr->len = (uint8_t)Overhead;
 
 	struct optdata *data = (struct optdata*)(ptr+opthdrlen);
-	data->src = iph->saddr;
-	data->dst = iph->daddr;
+	data->src = buf[15];
+	data->dst = buf[19];
 	iph->saddr = local_addr;
 	iph->daddr = next_hop->sin_addr.s_addr;
 
@@ -432,7 +453,7 @@ static int read_egress(int tun, int tcp_sock, int udp_sock, int icmp_sock, char 
 
 	next_hop = find_route((in_addr_t) iph->daddr);
 	if( !next_hop ) {
-		send_net_unreachable(tun, head);
+//		send_net_unreachable(tun, head);
 		goto _active;
 	}
 
@@ -459,11 +480,13 @@ _active:
 	return 1;
 }
 
-static void mangle_ingress(char *buf) {
+static void mangle_ingress(char *buf, in_addr_t saddr) {
 	struct iphdr *iph = (struct iphdr *)buf;
 	struct optdata *data = (struct optdata*)(buf+iphdrlen+opthdrlen);
-	iph->saddr = data->src;
-	iph->daddr = data->dst;
+	iph->saddr = saddr;
+	buf[15] = data->src;
+	iph->daddr = tun_addr;
+	buf[19] = data->dst;
 }
 
 static int read_ingress(int sock, char *buf) {
@@ -480,7 +503,11 @@ static int read_ingress(int sock, char *buf) {
 	if (opthdr->type != option_type) {
 		goto _active;
 	}
-	mangle_ingress(buf);
+	in_addr_t *saddr = find_subnet((in_addr_t) iph->saddr);
+	if (!saddr) {
+		goto _active;
+	}
+	mangle_ingress(buf, *saddr);
 //	printc("ingress encoded: ", buf, pktlen);
 	struct sockaddr_in sa = {
 		.sin_family = AF_INET,
@@ -504,11 +531,12 @@ void *_process_cmd(void * ptr) {
 
 void *_read_egress(void *ptr) {
 	struct proxy *p = (struct proxy *) ptr;
+	char * buf = (char *) malloc(MTU);
 	while(1) {
 		if (exit_flag) {
 			return 0;
 		}
-		read_egress(p->tun, p->tcp_sock, p->udp_sock, p->icmp_sock, p->buf);
+		read_egress(p->tun, p->tcp_sock, p->udp_sock, p->icmp_sock, buf);
 	}
 }
 
@@ -531,11 +559,12 @@ void *_read_ingress(void *ptr) {
 			rcv = p->p->icmp_recv;
 			break;
 	}
+	char * buf = (char *) malloc(MTU);
 	while(1) {
 		if (exit_flag) {
 			return 0;
 		}
-		read_ingress(rcv, p->p->buf);
+		read_ingress(rcv, buf);
 	}
 }
 
@@ -547,11 +576,7 @@ void run_ip_proxy(int tun, int tcp_sock, int udp_sock, int icmp_sock, int icmp_r
 	MTU = mtu;
 	Overhead = overhead;
 	log_enabled = log_errors;
-	struct proxy p = {.ctl = ctl, .tun = tun, .tcp_sock = tcp_sock, .udp_sock = udp_sock, .icmp_sock = icmp_sock, .icmp_recv = icmp_recv, .buf = (char *) malloc(mtu)};
-	if( !p.buf ) {
-		log_error("Failed to allocate %d byte buffer\n", mtu);
-		exit(1);
-	}
+	struct proxy p = {.ctl = ctl, .tun = tun, .tcp_sock = tcp_sock, .udp_sock = udp_sock, .icmp_sock = icmp_sock, .icmp_recv = icmp_recv};
 	LOG("tcp %d udp %d icmp %d, ctl %d", p.tcp_sock, p.udp_sock, p.icmp_sock, ctl);
 
 	pthread_t *threads = malloc(sizeof(pthread_t)*5);
@@ -582,5 +607,4 @@ void run_ip_proxy(int tun, int tcp_sock, int udp_sock, int icmp_sock, int icmp_r
 	for (int i = 0; i < 5; i++) {
 		pthread_join(threads[i], NULL);
 	}
-	free(p.buf);
 }

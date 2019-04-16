@@ -33,7 +33,7 @@ import (
 )
 
 const (
-	encapOverhead = 12 // 12 bytes IP option
+	encapOverhead = 4 // bytes of IP option
 )
 
 type network struct {
