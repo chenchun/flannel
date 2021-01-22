@@ -48,6 +48,7 @@ func WatchLeases(ctx context.Context, sm Manager, ownLease *Lease, receiver chan
 			time.Sleep(time.Second)
 			continue
 		}
+		time.Sleep(time.Second*3)
 
 		cursor = res.Cursor
 
